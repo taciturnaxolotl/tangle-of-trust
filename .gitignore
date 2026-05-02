@@ -7,3 +7,4 @@ tangle-resolve
 tmp/
 node_modules/
 web-dist/
+vendor/
