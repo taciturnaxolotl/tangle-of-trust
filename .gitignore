@@ -1,0 +1,7 @@
+*.db
+*.db-shm
+*.db-wal
+tangle-ingest
+tangle-backfill
+tangle-resolve
+tmp/

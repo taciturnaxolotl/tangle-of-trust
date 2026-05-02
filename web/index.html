@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tangle of Trust</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #f1f5f9;
+            --bg-card: #ffffff;
+            --bg-input: #f9fafb;
+            --text-primary: #000000;
+            --text-secondary: #4b5563;
+            --text-muted: #6b7280;
+            --border-default: #e5e7eb;
+            --border-strong: #d1d5db;
+            --vouch: #40a02b;
+            --vouch-edge: rgba(64,160,43,0.6);
+            --denounce: #d20f39;
+            --denounce-edge: rgba(210,15,57,0.6);
+            --follow: #8839ef;
+            --follow-edge: rgba(136,57,239,0.55);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-page: #111827;
+                --bg-card: #1f2937;
+                --bg-input: #1f2937;
+                --text-primary: #ffffff;
+                --text-secondary: #d1d5db;
+                --text-muted: #9ca3af;
+                --border-default: #374151;
+                --border-strong: #4b5563;
+                --vouch: #a6da95;
+                --vouch-edge: rgba(166,218,149,0.6);
+                --denounce: #ed8796;
+                --denounce-edge: rgba(237,135,150,0.6);
+                --follow: #c6a0f6;
+                --follow-edge: rgba(198,160,246,0.55);
+            }
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; overflow: hidden; }
+        html { font-size: 14px; }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background: var(--bg-page);
+            color: var(--text-primary);
+            display: flex;
+            flex-direction: column;
+            transition: background-color 0.2s, color 0.2s;
+        }
+
+        header {
+            flex-shrink: 0;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-default);
+            padding: 0.5rem 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 20;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            text-decoration: none;
+            color: var(--text-primary);
+        }
+        .logo svg { width: 28px; height: 28px; }
+        .logo-text { font-weight: 700; font-size: 1.25rem; }
+        .logo-badge {
+            font-weight: 500;
+            font-size: 0.6875rem;
+            padding: 0.125rem 0.375rem;
+            border-radius: 0.25rem;
+            background: var(--bg-input);
+            border: 1px solid var(--border-default);
+        }
+
+        header nav {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            font-size: 0.875rem;
+            font-family: 'IBM Plex Mono', ui-monospace, monospace;
+            color: var(--text-muted);
+        }
+
+        #graph-container { flex: 1; min-height: 0; overflow: hidden; }
+
+        #controls {
+            flex-shrink: 0;
+            background: var(--bg-card);
+            border-top: 1px solid var(--border-default);
+            padding: 0.5rem 1.5rem;
+            z-index: 20;
+        }
+
+        #controls-row {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .filter-btn {
+            position: relative;
+            z-index: 1;
+            display: inline-flex;
+            min-height: 30px;
+            align-items: center;
+            justify-content: center;
+            padding: 0 0.5rem 0.2rem;
+            font-size: 0.875rem;
+            font-family: inherit;
+            color: var(--text-muted);
+            cursor: pointer;
+            background: transparent;
+            border: none;
+        }
+        .filter-btn::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            z-index: -1;
+            display: block;
+            border-radius: 0.25rem;
+            border: 1px solid var(--border-default);
+            background: var(--bg-card);
+            box-shadow: inset 0 -2px 0 0 rgba(0,0,0,0.1), 0 1px 0 0 rgba(0,0,0,0.04);
+            transition: all 0.15s ease-in-out;
+        }
+        .filter-btn:hover::before {
+            box-shadow: inset 0 -2px 0 0 rgba(0,0,0,0.15), 0 2px 1px 0 rgba(0,0,0,0.06);
+            background: var(--bg-input);
+        }
+        .filter-btn:active::before { box-shadow: inset 0 2px 2px 0 rgba(0,0,0,0.1); }
+        .filter-btn.active { color: var(--text-primary); }
+        .filter-btn.active .filter-dot { box-shadow: 0 0 0 2px var(--bg-card), 0 0 0 3px currentColor; }
+        .filter-btn:not(.active) .filter-dot { opacity: 0.4; }
+        .filter-btn:not(.active)::before { box-shadow: none; background: var(--bg-input); }
+
+        .filter-dot {
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+            transition: opacity 0.15s, box-shadow 0.15s;
+        }
+
+        .spacer { flex: 1; }
+
+        .legend { display: none; }
+        .legend-item { display: none; }
+        .legend-dot { display: none; }
+
+        #stats-row {
+            display: flex;
+            gap: 0;
+            font-size: 0.75rem;
+            font-family: 'IBM Plex Mono', ui-monospace, monospace;
+            color: var(--text-muted);
+            align-items: center;
+        }
+        #stats-row span { color: var(--text-secondary); margin-right: 3px; }
+
+        #loading {
+            position: fixed;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            z-index: 20;
+        }
+
+        #tooltip {
+            position: fixed;
+            background: var(--bg-card);
+            border: 1px solid var(--border-default);
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+            font-family: 'IBM Plex Mono', ui-monospace, monospace;
+            pointer-events: none;
+            z-index: 15;
+            display: none;
+            max-width: 320px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+        }
+        #tooltip .did { color: var(--text-primary); word-break: break-all; }
+        .kv { color: var(--vouch); }
+        .kd { color: var(--denounce); }
+        .kf { color: var(--follow); }
+        .action-line { display: flex; align-items: baseline; gap: 0; flex-wrap: wrap; }
+        .action-line .action-word { font-weight: 600; }
+        #tooltip .tooltip-profile {
+            display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;
+        }
+        #tooltip .tooltip-avatar {
+            width: 32px; height: 32px; border-radius: 50%;
+            border: 2px solid var(--border-default);
+            object-fit: cover; flex-shrink: 0;
+        }
+        #tooltip .tooltip-avatar-fallback {
+            width: 32px; height: 32px; border-radius: 50%;
+            background: var(--bg-input); border: 2px solid var(--border-default);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.75rem; color: var(--text-muted); flex-shrink: 0;
+        }
+        #tooltip .tooltip-name { font-weight: 600; color: var(--text-primary); font-size: 0.8125rem; }
+        #tooltip .tooltip-handle { color: var(--text-muted); font-size: 0.6875rem; }
+
+        ::selection { background: rgba(250,204,21,0.3); color: #000; }
+        @media (prefers-color-scheme: dark) {
+            ::selection { background: rgba(161,98,7,0.5); color: #fff; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <a href="/" class="logo">
+            <svg viewBox="0 0 25 25" width="28" height="28" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+                <path style="stroke-width:0.111183" d="m 16.775491,24.987061 c -0.78517,-0.0064 -1.384202,-0.234614 -2.033994,-0.631295 -0.931792,-0.490188 -1.643475,-1.31368 -2.152014,-2.221647 C 11.781409,23.136647 10.701392,23.744942 9.4922931,24.0886 8.9774725,24.238111 8.0757679,24.389777 6.5811304,23.84827 4.4270703,23.124679 2.8580086,20.883331 3.0363279,18.599583 3.0037061,17.652919 3.3488675,16.723769 3.8381157,15.925061 2.5329485,15.224503 1.4686756,14.048584 1.0611184,12.606459 0.81344502,11.816973 0.82385989,10.966486 0.91519098,10.154906 1.2422711,8.2387903 2.6795811,6.5725716 4.5299585,5.9732484 5.2685364,4.290122 6.8802592,3.0349975 8.706276,2.7794663 c 1.2124148,-0.1688264 2.46744,0.084987 3.52811,0.7011837 1.545426,-1.7139736 4.237779,-2.2205077 6.293579,-1.1676231 1.568222,0.7488935 2.689625,2.3113526 2.961888,4.0151464 1.492195,0.5977882 2.749007,1.8168898 3.242225,3.3644951 0.329805,0.9581836 0.340709,2.0135956 0.127128,2.9974286 -0.381606,1.535184 -1.465322,2.842146 -2.868035,3.556463 0.0034,0.273204 0.901506,2.243045 0.751284,3.729647 -0.03281,1.858525 -1.211631,3.619894 -2.846433,4.475452 -0.953967,0.556812 -2.084452,0.546309 -3.120531,0.535398 z m -4.470079,-5.349839 c 1.322246,-0.147248 2.189053,-1.300106 2.862307,-2.338363 0.318287,-0.472954 0.561404,-1.002348 0.803,-1.505815 0.313265,0.287151 0.578698,0.828085 1.074141,0.956909 0.521892,0.162542 1.133743,0.03052 1.45325,-0.443554 0.611414,-1.140449 0.31004,-2.516537 -0.04602,-3.698347 C 18.232844,11.92927 17.945151,11.232927 17.397785,10.751793 17.514522,9.9283111 17.026575,9.0919791 16.332883,8.6609491 15.741721,9.1323278 14.842258,9.1294949 14.271975,8.6252369 13.178927,9.7400102 12.177239,9.7029996 11.209704,8.8195135 10.992255,8.6209543 10.577326,10.031484 9.1211947,9.2324497 8.2846288,9.9333947 7.6359672,10.607693 7.0611981,11.578553 6.5026891,12.62523 5.9177873,13.554793 5.867393,14.69141 c -0.024234,0.66432 0.4948601,1.360337 1.1982269,1.306329 0.702996,0.06277 1.1815208,-0.629091 1.7138087,-0.916491 0.079382,0.927141 0.1688566,1.867012 0.5526926,2.714411 0.2185734,0.474191 0.6347468,0.870139 1.1430258,1.013693 0.394082,0.111489 0.828965,0.114989 1.205406,-0.05757 0.354889,-0.162414 0.623535,-0.476191 0.821879,-0.811434 0.375735,0.654705 0.892089,1.230083 1.519554,1.651602 0.342406,0.230165 0.740157,0.384163 1.15383,0.392604 0.471532,0.0096 0.936754,-0.167625 1.277957,-0.491679 0.185347,-0.175501 0.229756,-0.4427 0.379278,-0.647436 z"/>
+            </svg>
+            <span class="logo-text">tangled</span>
+            <span class="logo-badge">trust</span>
+        </a>
+        <nav><span id="header-stats"></span></nav>
+    </header>
+
+    <div id="graph-container"></div>
+    <div id="loading">Loading graph data...</div>
+    <div id="tooltip"></div>
+
+    <div id="controls">
+        <div id="controls-row">
+            <button class="filter-btn active" data-kind="vouch/vouch">
+                <span class="filter-dot" style="background:var(--vouch)"></span>vouch
+            </button>
+            <button class="filter-btn active" data-kind="vouch/denounce">
+                <span class="filter-dot" style="background:var(--denounce)"></span>denounce
+            </button>
+            <button class="filter-btn active" data-kind="follow">
+                <span class="filter-dot" style="background:var(--follow)"></span>follow
+            </button>
+            <div class="spacer"></div>
+            <div id="stats-row">
+                <span id="stat-nodes">0</span> nodes &middot;
+                <span id="stat-vouches">0</span> vouches &middot;
+                <span id="stat-denounces">0</span> denounces &middot;
+                <span id="stat-follows">0</span> follows
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import ForceGraph from 'https://esm.run/force-graph@1.43.5';
+
+        const container = document.getElementById('graph-container');
+        const loading = document.getElementById('loading');
+        const tooltip = document.getElementById('tooltip');
+        const headerStats = document.getElementById('header-stats');
+
+        let graphData = null;
+        let profileMap = {};
+        let fg = null;
+        const resolvingDIDs = new Set();
+
+        const edgeFilters = {
+            'vouch/vouch': true,
+            'vouch/denounce': true,
+            'follow': true,
+        };
+
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const kind = btn.dataset.kind;
+                edgeFilters[kind] = !edgeFilters[kind];
+                btn.classList.toggle('active', edgeFilters[kind]);
+                refreshGraph();
+            });
+        });
+
+        function getCSS(v) {
+            return getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+        }
+
+        function shortenDID(did) {
+            if (did.length > 24) return did.slice(0, 12) + '…' + did.slice(-8);
+            return did;
+        }
+
+        async function resolveDID(did) {
+            if (profileMap[did]?.handle) return profileMap[did];
+            if (resolvingDIDs.has(did)) return profileMap[did] || null;
+            resolvingDIDs.add(did);
+            try {
+                const resp = await fetch(`/api/resolve?did=${encodeURIComponent(did)}`);
+                if (resp.ok) {
+                    const p = await resp.json();
+                    if (p.handle) {
+                        profileMap[did] = { handle: p.handle, avatar: p.avatar_url || p.avatar || '' };
+                        return profileMap[did];
+                    }
+                }
+            } catch {}
+            return profileMap[did] || null;
+        }
+
+        async function loadData() {
+            const resp = await fetch('/api/graph');
+            graphData = await resp.json();
+
+            if (!graphData.edges || graphData.edges.length === 0) {
+                loading.textContent = 'No data yet. Run backfill or ingest to collect records...';
+                return;
+            }
+
+            for (const node of graphData.nodes) {
+                if (node.handle || node.avatar) {
+                    profileMap[node.id] = { handle: node.handle || '', avatar: node.avatar || '' };
+                }
+            }
+
+            loading.style.display = 'none';
+            initGraph();
+        }
+
+        function buildGraph() {
+            if (!graphData) return { nodes: [], links: [] };
+
+            const nodeSet = new Set();
+            const links = [];
+
+            for (const edge of graphData.edges) {
+                if (!edgeFilters[edge.kind]) continue;
+                nodeSet.add(edge.source);
+                nodeSet.add(edge.target);
+                links.push({
+                    source: edge.source,
+                    target: edge.target,
+                    kind: edge.kind,
+                    reason: edge.reason,
+                    time: edge.time,
+                });
+            }
+
+            const nodes = [...nodeSet].map(id => {
+                const p = profileMap[id] || {};
+                return { id, label: p.handle || id, handle: p.handle || '', avatar: p.avatar || '' };
+            });
+            return { nodes, links };
+        }
+
+        function edgeColor(link) {
+            switch (link.kind) {
+                case 'vouch/vouch': return getCSS('--vouch-edge') || 'rgba(64,160,43,0.6)';
+                case 'vouch/denounce': return getCSS('--denounce-edge') || 'rgba(210,15,57,0.6)';
+                case 'follow': return getCSS('--follow-edge') || 'rgba(136,57,239,0.55)';
+                default: return 'rgba(107,114,128,0.3)';
+            }
+        }
+
+        function edgeWidth(link) {
+            switch (link.kind) {
+                case 'vouch/vouch': return 2;
+                case 'vouch/denounce': return 1.5;
+                case 'follow': return 1;
+                default: return 1;
+            }
+        }
+
+        function arrowColor(link) {
+            switch (link.kind) {
+                case 'vouch/vouch': return getCSS('--vouch') || '#40a02b';
+                case 'vouch/denounce': return getCSS('--denounce') || '#d20f39';
+                case 'follow': return getCSS('--follow') || '#8839ef';
+                default: return '#6b7280';
+            }
+        }
+
+        function nodeColor(node, links) {
+            const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            // count incoming vouch vs denounce edges for this node (as target)
+            let vouches = 0, denounces = 0;
+            for (const link of links) {
+                const tgt = link.target.id || link.target;
+                if (tgt === node.id) {
+                    if (link.kind === 'vouch/vouch') vouches++;
+                    else if (link.kind === 'vouch/denounce') denounces++;
+                }
+            }
+            const total = vouches + denounces;
+            if (total === 0) return isDark ? '#6e738d' : '#9ca0b0'; // gray = no vouch/denounce
+            const ratio = denounces / total;
+            if (ratio > 0.5) return isDark ? '#ed8796' : '#d20f39'; // red = majority denounced
+            if (ratio > 0.1) return isDark ? '#eed49f' : '#df8e1d'; // yellow = >10% denounced
+            return isDark ? '#a6da95' : '#40a02b'; // green = mostly vouched
+        }
+
+        const avatarCache = new Map();
+        function getAvatarImg(url) {
+            if (!url) return null;
+            if (avatarCache.has(url)) return avatarCache.get(url);
+            const proxyUrl = `/api/proxy/avatar?url=${encodeURIComponent(url)}`;
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.src = proxyUrl;
+            avatarCache.set(url, img);
+            return img;
+        }
+
+        function initGraph() {
+            const data = buildGraph();
+            const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+            for (const node of data.nodes) {
+                if (node.avatar) getAvatarImg(node.avatar);
+            }
+
+            fg = ForceGraph()(container)
+                .graphData(data)
+                .backgroundColor(isDark ? '#111827' : '#f1f5f9')
+                .nodeLabel('')
+                .nodeCanvasObject((node, ctx, globalScale) => {
+                    const size = Math.max(6, Math.min(20, 4 * Math.log2(getNodeDegree(node.id, data.links) + 2)));
+                    const img = node.avatar ? getAvatarImg(node.avatar) : null;
+
+                    if (img && img.complete && img.naturalWidth > 0) {
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
+                        ctx.closePath();
+                        ctx.clip();
+                        ctx.drawImage(img, node.x - size, node.y - size, size * 2, size * 2);
+                        ctx.restore();
+
+                        // colored ring matching node degree
+                        const ringColor = nodeColor(node, data.links);
+                        ctx.beginPath();
+                        ctx.arc(node.x, node.y, size + 1.5, 0, 2 * Math.PI);
+                        ctx.strokeStyle = ringColor;
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                    } else {
+                        const color = nodeColor(node, data.links);
+                        ctx.beginPath();
+                        ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
+                        ctx.fillStyle = isDark ? '#1f2937' : '#f1f5f9';
+                        ctx.fill();
+                        ctx.strokeStyle = color;
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+
+                        const initial = (node.handle || node.id).charAt(0).toUpperCase();
+                        const fontSize = Math.max(4, size * 0.9);
+                        ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillStyle = color;
+                        ctx.fillText(initial, node.x, node.y);
+                    }
+                })
+                .nodeCanvasObjectMode(() => 'replace')
+                .nodeVal(node => Math.max(1, Math.log2(getNodeDegree(node.id, data.links) + 1)))
+                .linkColor(edgeColor)
+                .linkWidth(edgeWidth)
+                .linkDirectionalArrowLength(link => link.kind.startsWith('vouch/') ? 4 : 3)
+                .linkDirectionalArrowRelPos(1)
+                .linkDirectionalArrowColor(arrowColor)
+                .linkVisibility(link => edgeFilters[link.kind] !== false)
+                .onNodeHover(async node => {
+                    if (node) {
+                        tooltip.style.display = 'block';
+                        renderTooltip(node);
+                        // lazy resolve if missing profile
+                        if (!profileMap[node.id]?.handle) {
+                            const p = await resolveDID(node.id);
+                            if (p?.handle) {
+                                node.handle = p.handle;
+                                node.avatar = p.avatar;
+                                node.label = p.handle;
+                                if (p.avatar) getAvatarImg(p.avatar);
+                                renderTooltip(node);
+                                fg.nodeCanvasObject(scratchRedraw);
+                            }
+                        }
+                    } else {
+                        tooltip.style.display = 'none';
+                    }
+                })
+                .onLinkHover(link => {
+                    if (link) {
+                        const srcId = link.source.id || link.source;
+                        const tgtId = link.target.id || link.target;
+                        const srcP = profileMap[srcId] || {};
+                        const tgtP = profileMap[tgtId] || {};
+                        const kindClass = link.kind === 'vouch/denounce' ? 'kd'
+                            : link.kind === 'vouch/vouch' ? 'kv' : 'kf';
+                        const label = link.kind === 'vouch/denounce' ? 'denounce'
+                            : link.kind === 'vouch/vouch' ? 'vouch' : 'follow';
+                        tooltip.style.display = 'block';
+                        const srcAvatar = srcP.avatar
+                            ? `<img class="tooltip-avatar" src="/api/proxy/avatar?url=${encodeURIComponent(srcP.avatar)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="tooltip-avatar-fallback" style="display:none">${(srcP.handle || srcId).charAt(0).toUpperCase()}</div>`
+                            : `<div class="tooltip-avatar-fallback">${(srcP.handle || shortenDID(srcId)).charAt(0).toUpperCase()}</div>`;
+                        const tgtAvatar = tgtP.avatar
+                            ? `<img class="tooltip-avatar" src="/api/proxy/avatar?url=${encodeURIComponent(tgtP.avatar)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="tooltip-avatar-fallback" style="display:none">${(tgtP.handle || tgtId).charAt(0).toUpperCase()}</div>`
+                            : `<div class="tooltip-avatar-fallback">${(tgtP.handle || shortenDID(tgtId)).charAt(0).toUpperCase()}</div>`;
+                        tooltip.innerHTML = `
+                            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                                ${srcAvatar}
+                                <span class="did">${srcP.handle || shortenDID(srcId)}</span>
+                                <span class="${kindClass} action-word">${label}s</span>
+                                ${tgtAvatar}
+                                <span class="did">${tgtP.handle || shortenDID(tgtId)}</span>
+                            </div>
+                            ${link.reason ? `<div style="margin-top:4px;color:var(--text-muted);word-break:break-word">${link.reason}</div>` : ''}
+                        `;
+                    } else {
+                        tooltip.style.display = 'none';
+                    }
+                })
+                .onNodeClick(node => {
+                    if (node) window.open(`https://tangled.org/${node.id}`, '_blank');
+                })
+                .cooldownTime(2000);
+
+            container.addEventListener('mousemove', e => {
+                if (tooltip.style.display === 'block') {
+                    tooltip.style.left = (e.clientX + 14) + 'px';
+                    tooltip.style.top = (e.clientY + 14) + 'px';
+                }
+            });
+
+            document.addEventListener('keydown', e => {
+                if (e.code === 'Space' && e.target === document.body) {
+                    e.preventDefault();
+                    const controlsHeight = document.getElementById('controls').offsetHeight;
+                    fg.zoomToFit(400, 30);
+                    const c = fg.centerAt();
+                    fg.centerAt(c.x, c.y + controlsHeight / 2, 0);
+                }
+            });
+
+            updateStats(data);
+        }
+
+        function renderTooltip(node) {
+            const profile = profileMap[node.id] || {};
+            const handle = profile.handle || node.handle || '';
+            const avatar = profile.avatar || node.avatar || '';
+            const avatarHtml = avatar
+                ? `<img class="tooltip-avatar" src="${avatar}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="tooltip-avatar-fallback" style="display:none">${(handle || node.id).charAt(0).toUpperCase()}</div>`
+                : `<div class="tooltip-avatar-fallback">${(handle || node.id).charAt(0).toUpperCase()}</div>`;
+            tooltip.innerHTML = `
+                <div class="tooltip-profile">
+                    ${avatarHtml}
+                    <div>
+                        <div class="tooltip-name">${handle || shortenDID(node.id)}</div>
+                        ${handle ? `<div class="tooltip-handle">${shortenDID(node.id)}</div>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        // force a re-render after lazy resolution
+        let scratchRedrawCount = 0;
+        function scratchRedraw(node, ctx, gs) {
+            // force-graph redraws on every frame so once profile lands
+            // the next paint will pick up the avatar naturally
+        }
+
+        function getNodeDegree(nodeId, links) {
+            let degree = 0;
+            for (const link of links) {
+                const src = link.source.id || link.source;
+                const tgt = link.target.id || link.target;
+                if (src === nodeId || tgt === nodeId) degree++;
+            }
+            return degree;
+        }
+
+        function refreshGraph() {
+            if (!fg || !graphData) return;
+            const data = buildGraph();
+            fg.graphData(data);
+            updateStats(data);
+        }
+
+        function updateStats(data) {
+            document.getElementById('stat-nodes').textContent = data.nodes.length;
+            let vouches = 0, denounces = 0, follows = 0;
+            for (const l of data.links) {
+                switch (l.kind) {
+                    case 'vouch/vouch': vouches++; break;
+                    case 'vouch/denounce': denounces++; break;
+                    case 'follow': follows++; break;
+                }
+            }
+            document.getElementById('stat-vouches').textContent = vouches;
+            document.getElementById('stat-denounces').textContent = denounces;
+            document.getElementById('stat-follows').textContent = follows;
+            headerStats.textContent = `${data.nodes.length} nodes / ${data.links.length} edges`;
+        }
+
+        loadData();
+    </script>
+</body>
+</html>
