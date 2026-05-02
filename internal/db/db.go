@@ -173,6 +173,36 @@ func (s *Store) UpsertVouch(v Vouch) error {
 	return err
 }
 
+func (s *Store) BatchUpsertVouches(vouches []Vouch) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO vouches (voucher_did, vouchee_did, kind, reason, created_at, seq, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(voucher_did, vouchee_did) DO UPDATE SET
+			kind = excluded.kind,
+			reason = excluded.reason,
+			created_at = excluded.created_at,
+			seq = excluded.seq,
+			updated_at = excluded.updated_at
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, v := range vouches {
+		if _, err := stmt.Exec(v.VoucherDID, v.VoucheeDID, v.Kind, v.Reason, v.CreatedAt, v.Seq, v.UpdatedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) DeleteVouch(voucherDID, voucheeDID string) error {
 	_, err := s.db.Exec(`DELETE FROM vouches WHERE voucher_did = ? AND vouchee_did = ?`, voucherDID, voucheeDID)
 	return err
@@ -187,6 +217,33 @@ func (s *Store) UpsertFollow(f Follow) error {
 			updated_at = excluded.updated_at
 	`, f.ActorDID, f.SubjectDID, f.CreatedAt, f.UpdatedAt)
 	return err
+}
+
+func (s *Store) BatchUpsertFollows(follows []Follow) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO follows (actor_did, subject_did, created_at, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(actor_did, subject_did) DO UPDATE SET
+			created_at = excluded.created_at,
+			updated_at = excluded.updated_at
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, f := range follows {
+		if _, err := stmt.Exec(f.ActorDID, f.SubjectDID, f.CreatedAt, f.UpdatedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteFollow(actorDID, subjectDID string) error {
@@ -418,7 +475,6 @@ func (s *Store) TimeRange() (min time.Time, max time.Time, err error) {
 		SELECT MIN(t), MAX(t) FROM (
 			SELECT updated_at as t FROM vouches WHERE updated_at > '0001-01-01'
 			UNION ALL SELECT updated_at FROM follows WHERE updated_at > '0001-01-01'
-			UNION ALL SELECT updated_at FROM stars WHERE updated_at > '0001-01-01'
 			UNION ALL SELECT updated_at FROM knot_members WHERE updated_at > '0001-01-01'
 		)
 	`).Scan(&min, &max)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,12 +22,16 @@ import (
 )
 
 const (
-	VouchCollection     = "sh.tangled.graph.vouch"
-	FollowCollection    = "sh.tangled.graph.follow"
+	VouchCollection      = "sh.tangled.graph.vouch"
+	FollowCollection     = "sh.tangled.graph.follow"
 	KnotMemberCollection = "sh.tangled.knot.member"
-	DefaultKnotDID      = "did:plc:wshs7t2adsemcrrd4snkeqli"
-	ListRecordsLimit    = 100
-	MaxWorkers          = 20
+	DefaultKnotDID       = "did:plc:wshs7t2adsemcrrd4snkeqli"
+	ListRecordsLimit     = 100
+	MaxWorkers           = 20
+	ProfileBatchSize     = 50
+	ProfileInterval      = 30 * time.Second
+	MaxRetries           = 3
+	RetryBaseDelay       = 2 * time.Second
 )
 
 var httpClient = &http.Client{
@@ -131,7 +136,6 @@ func main() {
 	didCh := make(chan string, 10000)
 	var inFlight sync.WaitGroup
 
-	// seed initial DIDs
 	for _, did := range cleanSeeds {
 		visited.Store(did, true)
 		inFlight.Add(1)
@@ -144,7 +148,6 @@ func main() {
 	var totalErrors atomic.Int64
 	var startTime = time.Now()
 
-	// periodic progress ticker
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -153,11 +156,11 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				visited := totalVisited.Load()
+				v := totalVisited.Load()
 				elapsed := time.Since(startTime).Round(time.Second)
-				rate := float64(visited) / elapsed.Seconds()
+				rate := float64(v) / elapsed.Seconds()
 				slog.Info("progress",
-					"visited", visited,
+					"visited", v,
 					"vouches", totalVouches.Load(),
 					"follows", totalFollows.Load(),
 					"errors", totalErrors.Load(),
@@ -169,7 +172,55 @@ func main() {
 		}
 	}()
 
-	// closer: wait for all in-flight work to finish, then close the channel
+	// background profile enrichment
+	var profileWg sync.WaitGroup
+	profileDIDs := make(chan string, 5000)
+	profileWg.Add(1)
+	go func() {
+		defer profileWg.Done()
+		batch := make([]string, 0, ProfileBatchSize)
+		timer := time.NewTimer(ProfileInterval)
+		defer timer.Stop()
+
+		flush := func() {
+			if len(batch) == 0 {
+				return
+			}
+			dids := make([]string, len(batch))
+			copy(dids, batch)
+			batch = batch[:0]
+
+			enriched, err := resolve.BatchResolveAndStore(ctx, store, dids)
+			if err != nil {
+				slog.Warn("batch profile resolve had errors", "count", len(dids), "error", err)
+			}
+			if enriched > 0 {
+				slog.Info("enriched profiles", "count", enriched)
+			}
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				flush()
+				return
+			case did, ok := <-profileDIDs:
+				if !ok {
+					flush()
+					return
+				}
+				batch = append(batch, did)
+				if len(batch) >= ProfileBatchSize {
+					flush()
+					timer.Reset(ProfileInterval)
+				}
+			case <-timer.C:
+				flush()
+				timer.Reset(ProfileInterval)
+			}
+		}
+	}()
+
 	go func() {
 		inFlight.Wait()
 		close(didCh)
@@ -206,6 +257,11 @@ func main() {
 						inFlight.Add(1)
 						select {
 						case didCh <- newDID:
+							// queue new DID for profile enrichment
+							select {
+							case profileDIDs <- newDID:
+							default:
+							}
 						case <-ctx.Done():
 							inFlight.Done()
 						}
@@ -217,6 +273,8 @@ func main() {
 	}
 
 	wg.Wait()
+	close(profileDIDs)
+	profileWg.Wait()
 
 	elapsed := time.Since(startTime).Round(time.Second)
 	rate := float64(totalVisited.Load()) / elapsed.Seconds()
@@ -228,13 +286,6 @@ func main() {
 		"elapsed", elapsed.String(),
 		"rate", fmt.Sprintf("%.1f/s", rate),
 	)
-
-	slog.Info("enriching profiles...")
-	enriched, err := resolve.EnrichMissing(ctx, store, 100)
-	if err != nil {
-		slog.Warn("profile enrichment had errors", "error", err)
-	}
-	slog.Info("profile enrichment complete", "enriched", enriched)
 }
 
 func bootstrapFromDB(store *db.Store) []string {
@@ -261,13 +312,7 @@ func fetchKnotMembers(ctx context.Context, knotDID string) ([]db.KnotMember, err
 		default:
 		}
 
-		u := fmt.Sprintf("%s/xrpc/com.atproto.repo.listRecords?repo=%s&collection=%s&limit=%d",
-			pdsURL, knotDID, KnotMemberCollection, ListRecordsLimit)
-		if cursor != "" {
-			u += "&cursor=" + cursor
-		}
-
-		records, nextCursor, err := listRecords(ctx, pdsURL, knotDID, KnotMemberCollection, cursor)
+		records, nextCursor, err := listRecordsWithRetry(ctx, pdsURL, knotDID, KnotMemberCollection, cursor)
 		if err != nil {
 			return members, err
 		}
@@ -313,7 +358,6 @@ func backfillDID(ctx context.Context, store *db.Store, pdsCache *sync.Map, did s
 
 	var newDIDs []string
 
-	// try all collections in parallel
 	type result struct {
 		dids  []string
 		count int
@@ -353,13 +397,13 @@ func backfillDID(ctx context.Context, store *db.Store, pdsCache *sync.Map, did s
 
 func fetchVouches(ctx context.Context, store *db.Store, pdsURL, did string) ([]string, int, error) {
 	var newDIDs []string
-	count := 0
+	var vouches []db.Vouch
 	cursor := ""
 
 	for {
-		records, nextCursor, err := listRecords(ctx, pdsURL, did, VouchCollection, cursor)
+		records, nextCursor, err := listRecordsWithRetry(ctx, pdsURL, did, VouchCollection, cursor)
 		if err != nil {
-			return newDIDs, count, err
+			return newDIDs, 0, err
 		}
 
 		for _, rec := range records {
@@ -378,7 +422,7 @@ func fetchVouches(ctx context.Context, store *db.Store, pdsURL, did string) ([]s
 				updatedAt = t
 			}
 
-			v := db.Vouch{
+			vouches = append(vouches, db.Vouch{
 				VoucherDID: did,
 				VoucheeDID: rkey,
 				Kind:      vouch.Kind,
@@ -386,12 +430,7 @@ func fetchVouches(ctx context.Context, store *db.Store, pdsURL, did string) ([]s
 				CreatedAt: vouch.CreatedAt,
 				Seq:       0,
 				UpdatedAt: updatedAt,
-			}
-
-			if err := store.UpsertVouch(v); err != nil {
-				return newDIDs, count, fmt.Errorf("upsert vouch: %w", err)
-			}
-			count++
+			})
 			if isValidDID(rkey) {
 				newDIDs = append(newDIDs, rkey)
 			}
@@ -403,18 +442,24 @@ func fetchVouches(ctx context.Context, store *db.Store, pdsURL, did string) ([]s
 		cursor = nextCursor
 	}
 
-	return newDIDs, count, nil
+	if len(vouches) > 0 {
+		if err := store.BatchUpsertVouches(vouches); err != nil {
+			return newDIDs, 0, fmt.Errorf("batch upsert vouches: %w", err)
+		}
+	}
+
+	return newDIDs, len(vouches), nil
 }
 
 func fetchFollows(ctx context.Context, store *db.Store, pdsURL, did string) ([]string, int, error) {
 	var newDIDs []string
-	count := 0
+	var follows []db.Follow
 	cursor := ""
 
 	for {
-		records, nextCursor, err := listRecords(ctx, pdsURL, did, FollowCollection, cursor)
+		records, nextCursor, err := listRecordsWithRetry(ctx, pdsURL, did, FollowCollection, cursor)
 		if err != nil {
-			return newDIDs, count, err
+			return newDIDs, 0, err
 		}
 
 		for _, rec := range records {
@@ -432,17 +477,12 @@ func fetchFollows(ctx context.Context, store *db.Store, pdsURL, did string) ([]s
 				updatedAt = t
 			}
 
-			f := db.Follow{
+			follows = append(follows, db.Follow{
 				ActorDID:   did,
 				SubjectDID: follow.Subject,
 				CreatedAt:  follow.CreatedAt,
 				UpdatedAt:  updatedAt,
-			}
-
-			if err := store.UpsertFollow(f); err != nil {
-				return newDIDs, count, fmt.Errorf("upsert follow: %w", err)
-			}
-			count++
+			})
 			newDIDs = append(newDIDs, follow.Subject)
 		}
 
@@ -452,12 +492,38 @@ func fetchFollows(ctx context.Context, store *db.Store, pdsURL, did string) ([]s
 		cursor = nextCursor
 	}
 
-	return newDIDs, count, nil
+	if len(follows) > 0 {
+		if err := store.BatchUpsertFollows(follows); err != nil {
+			return newDIDs, 0, fmt.Errorf("batch upsert follows: %w", err)
+		}
+	}
+
+	return newDIDs, len(follows), nil
 }
 
 type Record struct {
 	URI   string
 	Value json.RawMessage
+}
+
+func listRecordsWithRetry(ctx context.Context, pdsURL, did, collection, cursor string) ([]Record, string, error) {
+	var lastErr error
+	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		if attempt > 0 {
+			delay := RetryBaseDelay * time.Duration(math.Pow(2, float64(attempt-1)))
+			select {
+			case <-ctx.Done():
+				return nil, "", ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		records, nextCursor, err := listRecords(ctx, pdsURL, did, collection, cursor)
+		if err == nil {
+			return records, nextCursor, nil
+		}
+		lastErr = err
+	}
+	return nil, "", lastErr
 }
 
 func listRecords(ctx context.Context, pdsURL, did, collection, cursor string) ([]Record, string, error) {
