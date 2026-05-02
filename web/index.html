@@ -319,6 +319,9 @@
             <button class="filter-btn active" data-kind="vouch/denounce">
                 <span class="filter-dot" style="background:var(--denounce)"></span>denounce
             </button>
+            <button class="filter-btn active" data-kind="vouch/mixed">
+                <span class="filter-dot" style="background:#df8e1d"></span>mixed
+            </button>
             <button class="filter-btn" data-kind="follow">
                 <span class="filter-dot" style="background:var(--follow)"></span>follow
             </button>
@@ -327,6 +330,7 @@
                 <span id="stat-nodes">0</span> nodes &middot;
                 <span id="stat-vouches">0</span> vouches &middot;
                 <span id="stat-denounces">0</span> denounces &middot;
+                <span id="stat-mixed">0</span> mixed &middot;
                 <span id="stat-follows">0</span> follows
             </div>
         </div>
@@ -348,6 +352,7 @@
         const edgeFilters = {
             'vouch/vouch': true,
             'vouch/denounce': true,
+            'vouch/mixed': true,
             'follow': false,
         };
 
@@ -362,6 +367,10 @@
 
         function getCSS(v) {
             return getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+        }
+
+        function isDarkMode() {
+            return window.matchMedia('(prefers-color-scheme: dark)').matches;
         }
 
         function shortenDID(did) {
@@ -405,29 +414,125 @@
             initGraph();
         }
 
+        let nodeDegrees = {};
+        let nodeInVouch = {};
+        let nodeInDenounce = {};
+        let nodeOutVouch = {};
+        let nodeOutDenounce = {};
+        let nodeColors = {};
+
         function buildGraph() {
             if (!graphData) return { nodes: [], links: [] };
 
             const nodeSet = new Set();
             const links = [];
 
+            // deduplicate mutual edges between same pair
+            // for vouch/denounce: if A→B vouch and B→A denounce exist, merge into one line
+            // for same-kind mutual: A→B vouch and B→A vouch -> one line with mutual=true
+            const pairIndex = new Map(); // "min|max" -> { vouch: link, denounce: link }
             for (const edge of graphData.edges) {
                 if (!edgeFilters[edge.kind]) continue;
-                nodeSet.add(edge.source);
-                nodeSet.add(edge.target);
-                links.push({
-                    source: edge.source,
-                    target: edge.target,
-                    kind: edge.kind,
-                    reason: edge.reason,
-                    time: edge.time,
-                });
+                const min = edge.source < edge.target ? edge.source : edge.target;
+                const max = edge.source < edge.target ? edge.target : edge.source;
+                const pairKey = min + '|' + max;
+                if (!pairIndex.has(pairKey)) pairIndex.set(pairKey, {});
+                const entry = pairIndex.get(pairKey);
+                const kind = edge.kind === 'vouch/vouch' ? 'vouch' : edge.kind === 'vouch/denounce' ? 'denounce' : 'follow';
+                if (kind === 'vouch' || kind === 'denounce') {
+                    if (!entry[kind]) {
+                        entry[kind] = {
+                            source: edge.source,
+                            target: edge.target,
+                            kind: edge.kind,
+                            reason: edge.reason,
+                            time: edge.time,
+                        };
+                    } else {
+                        // same kind, both directions -> mutual
+                        entry[kind].mutual = true;
+                    }
+                } else {
+                    // follows: just add directly
+                    if (!entry.follows) entry.follows = [];
+                    entry.follows.push({
+                        source: edge.source,
+                        target: edge.target,
+                        kind: edge.kind,
+                        reason: edge.reason,
+                        time: edge.time,
+                        mutual: false,
+                    });
+                }
+            }
+
+            for (const entry of pairIndex.values()) {
+                if (entry.vouch && entry.denounce) {
+                    // mixed: one line showing both
+                    nodeSet.add(entry.vouch.source);
+                    nodeSet.add(entry.vouch.target);
+                    links.push({
+                        source: entry.vouch.source,
+                        target: entry.vouch.target,
+                        kind: 'vouch/mixed',
+                        reason: entry.vouch.reason,
+                        time: entry.vouch.time,
+                        mutual: true,
+                    });
+                } else if (entry.vouch) {
+                    nodeSet.add(entry.vouch.source);
+                    nodeSet.add(entry.vouch.target);
+                    links.push(entry.vouch);
+                } else if (entry.denounce) {
+                    nodeSet.add(entry.denounce.source);
+                    nodeSet.add(entry.denounce.target);
+                    links.push(entry.denounce);
+                }
+                if (entry.follows) {
+                    for (const fl of entry.follows) {
+                        nodeSet.add(fl.source);
+                        nodeSet.add(fl.target);
+                        links.push(fl);
+                    }
+                }
             }
 
             const nodes = [...nodeSet].map(id => {
                 const p = profileMap[id] || {};
                 return { id, label: p.handle || id, handle: p.handle || '', avatar: p.avatar || '' };
             });
+
+            // pre-compute degrees and vouch/denounce counts
+            nodeDegrees = {};
+            nodeInVouch = {};
+            nodeInDenounce = {};
+            nodeOutVouch = {};
+            nodeOutDenounce = {};
+            for (const n of nodes) { nodeDegrees[n.id] = 0; nodeInVouch[n.id] = 0; nodeInDenounce[n.id] = 0; nodeOutVouch[n.id] = 0; nodeOutDenounce[n.id] = 0; }
+            for (const link of links) {
+                const src = link.source.id || link.source;
+                const tgt = link.target.id || link.target;
+                nodeDegrees[src] = (nodeDegrees[src] || 0) + 1;
+                nodeDegrees[tgt] = (nodeDegrees[tgt] || 0) + 1;
+                if (link.kind === 'vouch/vouch') { nodeInVouch[tgt] = (nodeInVouch[tgt] || 0) + 1; nodeOutVouch[src] = (nodeOutVouch[src] || 0) + 1; }
+                else if (link.kind === 'vouch/denounce') { nodeInDenounce[tgt] = (nodeInDenounce[tgt] || 0) + 1; nodeOutDenounce[src] = (nodeOutDenounce[src] || 0) + 1; }
+                else if (link.kind === 'vouch/mixed') { nodeInVouch[tgt] = (nodeInVouch[tgt] || 0) + 1; nodeInDenounce[tgt] = (nodeInDenounce[tgt] || 0) + 1; nodeOutVouch[src] = (nodeOutVouch[src] || 0) + 1; nodeOutDenounce[src] = (nodeOutDenounce[src] || 0) + 1; }
+            }
+
+            // pre-compute node colors
+            const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            nodeColors = {};
+            for (const n of nodes) {
+                const vouches = nodeInVouch[n.id] || 0;
+                const denounces = nodeInDenounce[n.id] || 0;
+                const total = vouches + denounces;
+                if (total === 0) { nodeColors[n.id] = isDark ? '#6e738d' : '#9ca0b0'; continue; }
+                const ratio = denounces / total;
+                if (ratio > 0.5) nodeColors[n.id] = isDark ? '#ed8796' : '#d20f39';
+                else if (ratio > 0.1) nodeColors[n.id] = isDark ? '#eed49f' : '#df8e1d';
+                else nodeColors[n.id] = isDark ? '#a6da95' : '#40a02b';
+            }
+
             return { nodes, links };
         }
 
@@ -435,46 +540,37 @@
             switch (link.kind) {
                 case 'vouch/vouch': return getCSS('--vouch-edge') || 'rgba(64,160,43,0.6)';
                 case 'vouch/denounce': return getCSS('--denounce-edge') || 'rgba(210,15,57,0.6)';
+                case 'vouch/mixed': return isDarkMode() ? 'rgba(238,212,159,0.6)' : 'rgba(223,142,29,0.6)';
                 case 'follow': return getCSS('--follow-edge') || 'rgba(136,57,239,0.55)';
                 default: return 'rgba(107,114,128,0.3)';
             }
         }
 
         function edgeWidth(link) {
-            switch (link.kind) {
-                case 'vouch/vouch': return 2;
-                case 'vouch/denounce': return 1.5;
-                case 'follow': return 1;
-                default: return 1;
-            }
+            const base = (() => {
+                switch (link.kind) {
+                    case 'vouch/vouch': return 2;
+                    case 'vouch/denounce': return 1.5;
+                    case 'vouch/mixed': return 2;
+                    case 'follow': return 1;
+                    default: return 1;
+                }
+            })();
+            return link.mutual ? base + 1 : base;
         }
 
         function arrowColor(link) {
             switch (link.kind) {
                 case 'vouch/vouch': return getCSS('--vouch') || '#40a02b';
                 case 'vouch/denounce': return getCSS('--denounce') || '#d20f39';
+                case 'vouch/mixed': return isDarkMode() ? '#eed49f' : '#df8e1d';
                 case 'follow': return getCSS('--follow') || '#8839ef';
                 default: return '#6b7280';
             }
         }
 
-        function nodeColor(node, links) {
-            const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-            // count incoming vouch vs denounce edges for this node (as target)
-            let vouches = 0, denounces = 0;
-            for (const link of links) {
-                const tgt = link.target.id || link.target;
-                if (tgt === node.id) {
-                    if (link.kind === 'vouch/vouch') vouches++;
-                    else if (link.kind === 'vouch/denounce') denounces++;
-                }
-            }
-            const total = vouches + denounces;
-            if (total === 0) return isDark ? '#6e738d' : '#9ca0b0'; // gray = no vouch/denounce
-            const ratio = denounces / total;
-            if (ratio > 0.5) return isDark ? '#ed8796' : '#d20f39'; // red = majority denounced
-            if (ratio > 0.1) return isDark ? '#eed49f' : '#df8e1d'; // yellow = >10% denounced
-            return isDark ? '#a6da95' : '#40a02b'; // green = mostly vouched
+        function nodeColor(node) {
+            return nodeColors[node.id] || (window.matchMedia('(prefers-color-scheme: dark)').matches ? '#6e738d' : '#9ca0b0');
         }
 
         const avatarCache = new Map();
@@ -502,7 +598,7 @@
                 .backgroundColor(isDark ? '#111827' : '#f1f5f9')
                 .nodeLabel('')
                 .nodeCanvasObject((node, ctx, globalScale) => {
-                    const size = Math.max(6, Math.min(20, 4 * Math.log2(getNodeDegree(node.id, data.links) + 2)));
+                    const size = Math.max(6, Math.min(20, 4 * Math.log2(getNodeDegree(node.id) + 2)));
                     const img = node.avatar ? getAvatarImg(node.avatar) : null;
 
                     if (img && img.complete && img.naturalWidth > 0) {
@@ -515,14 +611,14 @@
                         ctx.restore();
 
                         // colored ring matching node degree
-                        const ringColor = nodeColor(node, data.links);
+                        const ringColor = nodeColor(node);
                         ctx.beginPath();
                         ctx.arc(node.x, node.y, size + 1.5, 0, 2 * Math.PI);
                         ctx.strokeStyle = ringColor;
                         ctx.lineWidth = 2;
                         ctx.stroke();
                     } else {
-                        const color = nodeColor(node, data.links);
+                        const color = nodeColor(node);
                         ctx.beginPath();
                         ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
                         ctx.fillStyle = isDark ? '#1f2937' : '#f1f5f9';
@@ -541,7 +637,7 @@
                     }
                 })
                 .nodeCanvasObjectMode(() => 'replace')
-                .nodeVal(node => Math.max(1, Math.log2(getNodeDegree(node.id, data.links) + 1)))
+                .nodeVal(node => Math.max(1, Math.log2(getNodeDegree(node.id) + 1)))
                 .linkColor(edgeColor)
                 .linkWidth(edgeWidth)
                 .linkDirectionalArrowLength(link => link.kind.startsWith('vouch/') ? 4 : 3)
@@ -575,9 +671,12 @@
                         const srcP = profileMap[srcId] || {};
                         const tgtP = profileMap[tgtId] || {};
                         const kindClass = link.kind === 'vouch/denounce' ? 'kd'
-                            : link.kind === 'vouch/vouch' ? 'kv' : 'kf';
+                            : link.kind === 'vouch/vouch' ? 'kv'
+                            : link.kind === 'vouch/mixed' ? 'ks' : 'kf';
                         const label = link.kind === 'vouch/denounce' ? 'denounce'
-                            : link.kind === 'vouch/vouch' ? 'vouch' : 'follow';
+                            : link.kind === 'vouch/vouch' ? 'vouch'
+                            : link.kind === 'vouch/mixed' ? 'mixed' : 'follow';
+                        const mutualTag = link.mutual ? ' (mutual)' : '';
                         tooltip.style.display = 'block';
                         const srcAvatar = srcP.avatar
                             ? `<img class="tooltip-avatar" src="/api/proxy/avatar?url=${encodeURIComponent(srcP.avatar)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="tooltip-avatar-fallback" style="display:none">${(srcP.handle || srcId).charAt(0).toUpperCase()}</div>`
@@ -589,7 +688,7 @@
                             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
                                 ${srcAvatar}
                                 <span class="did">${srcP.handle || shortenDID(srcId)}</span>
-                                <span class="${kindClass} action-word">${label}s</span>
+                                <span class="${kindClass} action-word">${label}s${mutualTag}</span>
                                 ${tgtAvatar}
                                 <span class="did">${tgtP.handle || shortenDID(tgtId)}</span>
                             </div>
@@ -602,11 +701,14 @@
                 .onNodeClick(node => {
                     if (node) window.open(`https://tangled.org/${node.id}`, '_blank');
                 })
-                .cooldownTime(4000);
+                .cooldownTime(1500);
 
-            // tune forces: moderate repulsion, longer links to spread center, distance cap prevents outliers
-            fg.d3Force('charge').strength(-100).distanceMax(400);
-            fg.d3Force('link').distance(80).strength(0.5);
+            // tune forces for better spacing
+            fg.d3Force('charge').strength(node => {
+                const deg = nodeDegrees[node.id] || 1;
+                return -30 * Math.min(deg, 20);
+            });
+            fg.d3Force('link').distance(link => link.kind === 'follow' ? 30 : 60);
 
             container.addEventListener('mousemove', e => {
                 if (tooltip.style.display === 'block') {
@@ -637,20 +739,19 @@
                 : `<div class="tooltip-avatar-fallback">${(handle || node.id).charAt(0).toUpperCase()}</div>`;
 
             // count incoming vouches vs denounces
-            let vouches = 0, denounces = 0;
-            for (const link of (fg ? fg.graphData().links : [])) {
-                const tgt = link.target.id || link.target;
-                if (tgt === node.id) {
-                    if (link.kind === 'vouch/vouch') vouches++;
-                    else if (link.kind === 'vouch/denounce') denounces++;
-                }
-            }
-            const total = vouches + denounces;
+            const inV = nodeInVouch[node.id] || 0;
+            const inD = nodeInDenounce[node.id] || 0;
+            const outV = nodeOutVouch[node.id] || 0;
+            const outD = nodeOutDenounce[node.id] || 0;
+            const total = inV + inD;
             let trustLine = '';
-            if (total > 0) {
-                const pct = Math.round((vouches / total) * 100);
+            if (total > 0 || outV + outD > 0) {
+                const pct = total > 0 ? Math.round((inV / total) * 100) : 100;
                 const cls = pct > 90 ? 'kv' : pct > 50 ? 'ks' : 'kd';
-                trustLine = `<div style="margin-top:4px;font-size:0.6875rem"><span class="${cls}">${pct}%</span> trusted <span style="color:var(--text-muted)">(${vouches}v / ${denounces}d)</span></div>`;
+                const inPart = total > 0 ? `<span class="kv">${inV}v</span> <span class="kd">${inD}d</span> in` : '';
+                const outPart = outV + outD > 0 ? `<span class="kv">${outV}v</span> <span class="kd">${outD}d</span> out` : '';
+                const sep = inPart && outPart ? ' · ' : '';
+                trustLine = `<div style="margin-top:4px;font-size:0.6875rem"><span class="${cls}">${pct}%</span> trusted · ${inPart}${sep}${outPart}</div>`;
             }
 
             tooltip.innerHTML = `
@@ -672,14 +773,8 @@
             // the next paint will pick up the avatar naturally
         }
 
-        function getNodeDegree(nodeId, links) {
-            let degree = 0;
-            for (const link of links) {
-                const src = link.source.id || link.source;
-                const tgt = link.target.id || link.target;
-                if (src === nodeId || tgt === nodeId) degree++;
-            }
-            return degree;
+        function getNodeDegree(nodeId) {
+            return nodeDegrees[nodeId] || 0;
         }
 
         function refreshGraph() {
@@ -691,16 +786,18 @@
 
         function updateStats(data) {
             document.getElementById('stat-nodes').textContent = data.nodes.length;
-            let vouches = 0, denounces = 0, follows = 0;
+            let vouches = 0, denounces = 0, mixed = 0, follows = 0;
             for (const l of data.links) {
                 switch (l.kind) {
                     case 'vouch/vouch': vouches++; break;
                     case 'vouch/denounce': denounces++; break;
+                    case 'vouch/mixed': mixed++; break;
                     case 'follow': follows++; break;
                 }
             }
             document.getElementById('stat-vouches').textContent = vouches;
             document.getElementById('stat-denounces').textContent = denounces;
+            document.getElementById('stat-mixed').textContent = mixed;
             document.getElementById('stat-follows').textContent = follows;
             headerStats.textContent = `${data.nodes.length} nodes / ${data.links.length} edges`;
         }
