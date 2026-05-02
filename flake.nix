@@ -20,26 +20,43 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
-      packages = forAllSystems (system: {
-        default =
-          let
-            pkgs = nixpkgs.legacyPackages.${system};
-          in
-          pkgs.buildGoModule {
-            pname = "tangle-of-trust";
-            version = "0.1.0";
+      packages = forAllSystems (system: let
+        pkgs = nixpkgs.legacyPackages.${system};
 
-            src = ./.;
+        webDist = pkgs.buildNpmPackage {
+          pname = "tangle-of-trust-web";
+          version = "0.1.0";
+          src = ./.;
+          npmDepsHash = "sha256-wGdPHKwLoedBX/JljRl/8qMn8LaL8X/lYmOP3PnMCyM=";
+          npmBuildCommand = "npx vite build";
+          installPhase = ''
+            mkdir -p $out
+            cp -r web-dist $out/
+          '';
+        };
+      in {
+        default = pkgs.buildGoModule {
+          pname = "tangle-of-trust";
+          version = "0.1.0";
+          src = ./.;
+          vendorHash = "sha256-qU8hOL2z/5Fjjczf374Enumxc0Shfxlit35AJNKIEV4=";
 
-            vendorHash = "sha256-qU8hOL2z/5Fjjczf374Enumxc0Shfxlit35AJNKIEV4=";
+          preBuild = ''
+            mkdir -p web-dist
+            cp -r ${webDist}/web-dist/* web-dist/
+          '';
 
-            meta = with pkgs.lib; {
-              description = "Visualize the tangled.social trust graph as an interactive force-directed graph";
-              homepage = "https://tangle.dunkirk.sh";
-              license = licenses.mit;
-              platforms = platforms.unix;
-            };
+          passthru.web-dist = "${webDist}/web-dist";
+
+          meta = with pkgs.lib; {
+            description = "Visualize the tangled.social trust graph as an interactive force-directed graph";
+            homepage = "https://tangle.dunkirk.sh";
+            license = licenses.mit;
+            platforms = platforms.unix;
           };
+        };
+
+        web-dist = webDist;
       });
 
       apps = forAllSystems (system: {

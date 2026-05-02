@@ -5,15 +5,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	"dunkirk.sh/tangle-of-trust/internal/db"
 	"dunkirk.sh/tangle-of-trust/internal/resolve"
 )
+
+var staticFS fs.FS
+
+func SetStaticFiles(fsys fs.FS) {
+	staticFS = fsys
+}
+
+func init() {
+	if dir := os.Getenv("TANGLE_STATIC_DIR"); dir != "" {
+		staticFS = os.DirFS(dir)
+	}
+}
 
 type GraphNode struct {
 	ID        string `json:"id"`
@@ -68,8 +82,18 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/stats", s.handleStats)
 	s.mux.HandleFunc("/api/resolve", s.handleResolve)
 	s.mux.HandleFunc("/api/profiles", s.handleProfiles)
-	// serve Vite-built static assets
-	s.mux.Handle("/", http.FileServer(http.Dir("web-dist")))
+	// serve embedded or provided static assets
+	if staticFS != nil {
+		// TANGLE_STATIC_DIR may point directly to the web-dist directory
+		// or to its parent; try "web-dist" subdirectory first, fall back to root
+		sub, err := fs.Sub(staticFS, "web-dist")
+		if err != nil || !fileExistsFS(sub, "index.html") {
+			sub = staticFS
+		}
+		s.mux.Handle("/", http.FileServer(http.FS(sub)))
+	} else {
+		s.mux.Handle("/", http.FileServer(http.Dir("web-dist")))
+	}
 }
 
 func (s *Server) Serve(addr string) error {
@@ -305,6 +329,15 @@ func writeGraphJSON(w http.ResponseWriter, vouches []db.Vouch, follows []db.Foll
 	gd.TimeRange.Max = maxT.Format(time.RFC3339)
 
 	writeJSON(w, gd)
+}
+
+func fileExistsFS(fsys fs.FS, name string) bool {
+	f, err := fsys.Open(name)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
 }
 
 func shortenDID(did string) string {
