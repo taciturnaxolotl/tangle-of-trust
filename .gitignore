@@ -5,3 +5,5 @@ tangle-ingest
 tangle-backfill
 tangle-resolve
 tmp/
+node_modules/
+web-dist/

@@ -1,0 +1,23 @@
+{
+  "name": "tangle-of-trust",
+  "version": "1.0.0",
+  "description": "![screenshot of the app](https://l4.dunkirk.sh/i/f7XrvO_YwM2a.webp)",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@knot.dunkirk.sh:did:plc:krxbvxvis5skq7jj6eot23ul/tangle-of-trust"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "vite": "^8.0.10"
+  },
+  "dependencies": {
+    "@cosmograph/cosmograph": "^2.3.1"
+  }
+}

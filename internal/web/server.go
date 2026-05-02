@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -69,7 +68,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/stats", s.handleStats)
 	s.mux.HandleFunc("/api/resolve", s.handleResolve)
 	s.mux.HandleFunc("/api/profiles", s.handleProfiles)
-	s.mux.HandleFunc("/", s.handleIndex)
+	// serve Vite-built static assets
+	s.mux.Handle("/", http.FileServer(http.Dir("web-dist")))
 }
 
 func (s *Server) Serve(addr string) error {
@@ -236,33 +236,24 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleTimeRange(w http.ResponseWriter, r *http.Request) {
-	min, max, err := s.store.TimeRange()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]string{
-		"min": min.Format(time.RFC3339),
-		"max": max.Format(time.RFC3339),
-	})
-}
-
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	data, err := os.ReadFile("web/index.html")
-	if err != nil {
-		http.Error(w, "ui not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(data)
-}
-
 func writeGraphJSON(w http.ResponseWriter, vouches []db.Vouch, follows []db.Follow, store *db.Store) {
+	profiles, _ := store.AllProfiles()
+
+	// Build set of tombstoned DIDs (handle="!") to exclude
+	tombstoned := make(map[string]bool)
+	for did, p := range profiles {
+		if p.Handle == "!" {
+			tombstoned[did] = true
+		}
+	}
+
 	nodeSet := make(map[string]bool)
 	var edges []GraphEdge
 
 	for _, v := range vouches {
+		if tombstoned[v.VoucherDID] || tombstoned[v.VoucheeDID] {
+			continue
+		}
 		nodeSet[v.VoucherDID] = true
 		nodeSet[v.VoucheeDID] = true
 		edges = append(edges, GraphEdge{
@@ -275,6 +266,9 @@ func writeGraphJSON(w http.ResponseWriter, vouches []db.Vouch, follows []db.Foll
 	}
 
 	for _, f := range follows {
+		if tombstoned[f.ActorDID] || tombstoned[f.SubjectDID] {
+			continue
+		}
 		nodeSet[f.ActorDID] = true
 		nodeSet[f.SubjectDID] = true
 		edges = append(edges, GraphEdge{
@@ -284,8 +278,6 @@ func writeGraphJSON(w http.ResponseWriter, vouches []db.Vouch, follows []db.Foll
 			Time:   f.UpdatedAt.Format(time.RFC3339),
 		})
 	}
-
-	profiles, _ := store.AllProfiles()
 
 	nodes := make([]GraphNode, 0, len(nodeSet))
 	for id := range nodeSet {
