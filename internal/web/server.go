@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"dunkirk.sh/tangle-of-trust/internal/db"
@@ -62,6 +64,7 @@ func NewServer(store *db.Store) *Server {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/proxy/avatar", s.handleAvatarProxy)
+	s.mux.HandleFunc("/api/search", s.handleSearch)
 	s.mux.HandleFunc("/api/graph", s.handleGraph)
 	s.mux.HandleFunc("/api/stats", s.handleStats)
 	s.mux.HandleFunc("/api/resolve", s.handleResolve)
@@ -110,6 +113,62 @@ func (s *Server) handleAvatarProxy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	io.Copy(w, resp.Body)
+}
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		writeJSON(w, map[string]interface{}{"actors": nil})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+
+	// Always try Bluesky search first
+	type SearchActor struct {
+		DID    string `json:"did"`
+		Handle string `json:"handle"`
+		Avatar string `json:"avatar"`
+	}
+	var actors []SearchActor
+
+	u := fmt.Sprintf("%s/xrpc/app.bsky.actor.searchActors?q=%s&limit=6", resolve.BskyPublicAPI, url.QueryEscape(q))
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err == nil {
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil && resp.StatusCode == 200 {
+			defer resp.Body.Close()
+			var result struct {
+				Actors []SearchActor `json:"actors"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&result) == nil {
+				actors = result.Actors
+			}
+		} else if resp != nil {
+			resp.Body.Close()
+		}
+	}
+
+	// If Bluesky found nothing and query looks like a handle (contains a dot), resolve via ATProto
+	if len(actors) == 0 && strings.Contains(q, ".") {
+		did, err := resolve.ResolveDIDFromHandle(ctx, q)
+		if err == nil && did != "" {
+			// try to get avatar from Bluesky
+			avatar := ""
+			handle := q
+			profiles, perr := resolve.BatchProfiles(ctx, []string{did})
+			if perr == nil && len(profiles) > 0 {
+				if profiles[0].Handle != "" {
+					handle = profiles[0].Handle
+				}
+				avatar = profiles[0].Avatar
+			}
+			actors = append(actors, SearchActor{DID: did, Handle: handle, Avatar: avatar})
+		}
+	}
+
+	writeJSON(w, map[string]interface{}{"actors": actors})
 }
 
 func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {

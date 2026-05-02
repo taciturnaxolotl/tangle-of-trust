@@ -141,6 +141,8 @@ func ResolveAndStore(ctx context.Context, store *db.Store, did string) error {
 		// PLC fallback for handle only
 		h, err := ResolveHandle(ctx, did)
 		if err != nil {
+			// tombstone: mark as unresolvable so we don't retry
+			store.UpsertProfile(db.Profile{DID: did, Handle: "!", UpdatedAt: time.Now()})
 			return fmt.Errorf("resolve handle: %w", err)
 		}
 		handle = h
@@ -199,6 +201,8 @@ func BatchResolveAndStore(ctx context.Context, store *db.Store, dids []string) (
 			handle, err := ResolveHandle(ctx, did)
 			if err != nil {
 				slog.Warn("handle resolution failed", "did", did, "error", err)
+				// tombstone: mark as unresolvable so we don't retry
+				store.UpsertProfile(db.Profile{DID: did, Handle: "!", UpdatedAt: time.Now()})
 			} else {
 				p.Handle = handle
 			}
@@ -265,6 +269,53 @@ func EnrichMissing(ctx context.Context, store *db.Store, batchSize int) (int, er
 			return total, nil
 		}
 	}
+}
+
+func ResolveDIDFromHandle(ctx context.Context, handle string) (string, error) {
+	// 1. Try DNS TXT _atproto.<handle>
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		fmt.Sprintf("https://dns.google/resolve?name=_atproto.%s&type=TXT", url.QueryEscape(handle)), nil)
+	if err == nil {
+		resp, err := httpClient.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				var dnsResult struct {
+					Answer []struct {
+						Data string `json:"data"`
+					} `json:"Answer"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&dnsResult) == nil {
+					for _, a := range dnsResult.Answer {
+						did := strings.TrimSpace(strings.Trim(a.Data, `"`))
+						if isValidDID(did) {
+							return did, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Try HTTPS well-known
+	wkReq, err := http.NewRequestWithContext(ctx, "GET",
+		fmt.Sprintf("https://%s/.well-known/atproto.json", handle), nil)
+	if err == nil {
+		resp, err := httpClient.Do(wkReq)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				var wkDoc struct {
+					DID string `json:"did"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&wkDoc) == nil && isValidDID(wkDoc.DID) {
+					return wkDoc.DID, nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not resolve handle %q to DID", handle)
 }
 
 func truncate(s string, n int) string {

@@ -128,10 +128,13 @@ func main() {
 	pdsCache := &sync.Map{}
 
 	visited := sync.Map{}
-	didCh := make(chan string, *workers*4)
+	didCh := make(chan string, 10000)
+	var inFlight sync.WaitGroup
 
+	// seed initial DIDs
 	for _, did := range cleanSeeds {
 		visited.Store(did, true)
+		inFlight.Add(1)
 		didCh <- did
 	}
 
@@ -139,6 +142,38 @@ func main() {
 	var totalVouches atomic.Int64
 	var totalFollows atomic.Int64
 	var totalErrors atomic.Int64
+	var startTime = time.Now()
+
+	// periodic progress ticker
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				visited := totalVisited.Load()
+				elapsed := time.Since(startTime).Round(time.Second)
+				rate := float64(visited) / elapsed.Seconds()
+				slog.Info("progress",
+					"visited", visited,
+					"vouches", totalVouches.Load(),
+					"follows", totalFollows.Load(),
+					"errors", totalErrors.Load(),
+					"queue", len(didCh),
+					"rate", fmt.Sprintf("%.1f/s", rate),
+					"elapsed", elapsed.String(),
+				)
+			}
+		}
+	}()
+
+	// closer: wait for all in-flight work to finish, then close the channel
+	go func() {
+		inFlight.Wait()
+		close(didCh)
+	}()
 
 	var wg sync.WaitGroup
 	for i := 0; i < *workers; i++ {
@@ -148,25 +183,18 @@ func main() {
 			for did := range didCh {
 				select {
 				case <-ctx.Done():
+					inFlight.Done()
 					return
 				default:
 				}
 
-				n := totalVisited.Add(1)
-				if n%20 == 0 {
-					slog.Info("progress",
-						"visited", n,
-						"vouches", totalVouches.Load(),
-						"follows", totalFollows.Load(),
-						"errors", totalErrors.Load(),
-						"queue", len(didCh),
-					)
-				}
+				totalVisited.Add(1)
 
 				newDIDs, err := backfillDID(ctx, store, pdsCache, did, &totalVouches, &totalFollows)
 				if err != nil {
 					totalErrors.Add(1)
 					slog.Warn("backfill failed", "did", did, "error", err)
+					inFlight.Done()
 					continue
 				}
 
@@ -175,25 +203,30 @@ func main() {
 						continue
 					}
 					if _, loaded := visited.LoadOrStore(newDID, true); !loaded {
+						inFlight.Add(1)
 						select {
 						case didCh <- newDID:
 						case <-ctx.Done():
-							return
+							inFlight.Done()
 						}
 					}
 				}
+				inFlight.Done()
 			}
 		}(i)
 	}
 
-	close(didCh)
 	wg.Wait()
 
+	elapsed := time.Since(startTime).Round(time.Second)
+	rate := float64(totalVisited.Load()) / elapsed.Seconds()
 	slog.Info("backfill complete",
 		"visited", totalVisited.Load(),
 		"vouches", totalVouches.Load(),
 		"follows", totalFollows.Load(),
 		"errors", totalErrors.Load(),
+		"elapsed", elapsed.String(),
+		"rate", fmt.Sprintf("%.1f/s", rate),
 	)
 
 	slog.Info("enriching profiles...")

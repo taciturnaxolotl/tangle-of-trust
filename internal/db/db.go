@@ -255,6 +255,9 @@ func (s *Store) ProfilesNeedingResolution(limit int) ([]string, error) {
 		AND d.did NOT IN (
 			SELECT did FROM profiles WHERE handle != '' AND avatar_url != ''
 		)
+		AND d.did NOT IN (
+			SELECT did FROM profiles WHERE handle = '!'
+		)
 		LIMIT ?
 	`, limit)
 	if err != nil {

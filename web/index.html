@@ -95,6 +95,69 @@
             color: var(--text-muted);
         }
 
+        #search-wrap {
+            position: relative;
+        }
+        #search-input {
+            font-family: 'IBM Plex Mono', ui-monospace, monospace;
+            font-size: 0.8125rem;
+            padding: 0.25rem 0.5rem;
+            border: 1px solid var(--border-default);
+            border-radius: 0.25rem;
+            background: var(--bg-input);
+            color: var(--text-primary);
+            outline: none;
+            width: 200px;
+            box-shadow: inset 0 -2px 0 0 rgba(0,0,0,0.05);
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        #search-input:focus {
+            border-color: var(--border-strong);
+            box-shadow: inset 0 -2px 0 0 rgba(0,0,0,0.1), 0 0 0 2px rgba(136,57,239,0.15);
+        }
+        #search-dropdown {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            margin-top: 4px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-default);
+            border-radius: 0.25rem;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            z-index: 30;
+            display: none;
+            min-width: 240px;
+            max-height: 260px;
+            overflow-y: auto;
+        }
+        .search-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.375rem 0.5rem;
+            cursor: pointer;
+            transition: background 0.1s;
+        }
+        .search-item:hover { background: var(--bg-input); }
+        .search-item img {
+            width: 24px; height: 24px; border-radius: 50%;
+            object-fit: cover; flex-shrink: 0;
+            border: 1px solid var(--border-default);
+        }
+        .search-item .search-fallback {
+            width: 24px; height: 24px; border-radius: 50%;
+            background: var(--bg-input); border: 1px solid var(--border-default);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.625rem; color: var(--text-muted); flex-shrink: 0;
+        }
+        .search-item .search-handle {
+            font-size: 0.8125rem; color: var(--text-primary); font-weight: 500;
+        }
+        .search-item .search-did {
+            font-size: 0.6875rem; color: var(--text-muted);
+        }
+        .search-item .search-info { overflow: hidden; }
+
         #graph-container { flex: 1; min-height: 0; overflow: hidden; }
 
         #controls {
@@ -200,6 +263,7 @@
         .kv { color: var(--vouch); }
         .kd { color: var(--denounce); }
         .kf { color: var(--follow); }
+        .ks { color: #df8e1d; }
         .action-line { display: flex; align-items: baseline; gap: 0; flex-wrap: wrap; }
         .action-line .action-word { font-weight: 600; }
         #tooltip .tooltip-profile {
@@ -234,7 +298,13 @@
             <span class="logo-text">tangled</span>
             <span class="logo-badge">trust</span>
         </a>
-        <nav><span id="header-stats"></span></nav>
+        <nav>
+            <div id="search-wrap">
+                <input id="search-input" type="text" placeholder="Search handle..." autocomplete="off" spellcheck="false">
+                <div id="search-dropdown"></div>
+            </div>
+            <span id="header-stats"></span>
+        </nav>
     </header>
 
     <div id="graph-container"></div>
@@ -249,7 +319,7 @@
             <button class="filter-btn active" data-kind="vouch/denounce">
                 <span class="filter-dot" style="background:var(--denounce)"></span>denounce
             </button>
-            <button class="filter-btn active" data-kind="follow">
+            <button class="filter-btn" data-kind="follow">
                 <span class="filter-dot" style="background:var(--follow)"></span>follow
             </button>
             <div class="spacer"></div>
@@ -278,7 +348,7 @@
         const edgeFilters = {
             'vouch/vouch': true,
             'vouch/denounce': true,
-            'follow': true,
+            'follow': false,
         };
 
         document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -532,7 +602,11 @@
                 .onNodeClick(node => {
                     if (node) window.open(`https://tangled.org/${node.id}`, '_blank');
                 })
-                .cooldownTime(2000);
+                .cooldownTime(4000);
+
+            // tune forces: moderate repulsion, longer links to spread center, distance cap prevents outliers
+            fg.d3Force('charge').strength(-100).distanceMax(400);
+            fg.d3Force('link').distance(80).strength(0.5);
 
             container.addEventListener('mousemove', e => {
                 if (tooltip.style.display === 'block') {
@@ -561,12 +635,31 @@
             const avatarHtml = avatar
                 ? `<img class="tooltip-avatar" src="${avatar}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="tooltip-avatar-fallback" style="display:none">${(handle || node.id).charAt(0).toUpperCase()}</div>`
                 : `<div class="tooltip-avatar-fallback">${(handle || node.id).charAt(0).toUpperCase()}</div>`;
+
+            // count incoming vouches vs denounces
+            let vouches = 0, denounces = 0;
+            for (const link of (fg ? fg.graphData().links : [])) {
+                const tgt = link.target.id || link.target;
+                if (tgt === node.id) {
+                    if (link.kind === 'vouch/vouch') vouches++;
+                    else if (link.kind === 'vouch/denounce') denounces++;
+                }
+            }
+            const total = vouches + denounces;
+            let trustLine = '';
+            if (total > 0) {
+                const pct = Math.round((vouches / total) * 100);
+                const cls = pct > 90 ? 'kv' : pct > 50 ? 'ks' : 'kd';
+                trustLine = `<div style="margin-top:4px;font-size:0.6875rem"><span class="${cls}">${pct}%</span> trusted <span style="color:var(--text-muted)">(${vouches}v / ${denounces}d)</span></div>`;
+            }
+
             tooltip.innerHTML = `
                 <div class="tooltip-profile">
                     ${avatarHtml}
                     <div>
                         <div class="tooltip-name">${handle || shortenDID(node.id)}</div>
                         ${handle ? `<div class="tooltip-handle">${shortenDID(node.id)}</div>` : ''}
+                        ${trustLine}
                     </div>
                 </div>
             `;
@@ -611,6 +704,68 @@
             document.getElementById('stat-follows').textContent = follows;
             headerStats.textContent = `${data.nodes.length} nodes / ${data.links.length} edges`;
         }
+
+        // --- search ---
+        const searchInput = document.getElementById('search-input');
+        const searchDropdown = document.getElementById('search-dropdown');
+        let searchTimeout = null;
+
+        searchInput.addEventListener('input', () => {
+            clearTimeout(searchTimeout);
+            const q = searchInput.value.trim();
+            if (q.length < 2) { searchDropdown.style.display = 'none'; return; }
+            searchTimeout = setTimeout(async () => {
+                try {
+                    const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+                    if (!resp.ok) return;
+                    const data = await resp.json();
+                    const actors = data.actors || [];
+                    if (actors.length === 0) { searchDropdown.style.display = 'none'; return; }
+                    searchDropdown.innerHTML = actors.map(a => {
+                        const avatar = a.avatar
+                            ? `<img src="/api/proxy/avatar?url=${encodeURIComponent(a.avatar)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="search-fallback" style="display:none">${a.handle.charAt(0).toUpperCase()}</div>`
+                            : `<div class="search-fallback">${a.handle.charAt(0).toUpperCase()}</div>`;
+                        return `<div class="search-item" data-did="${a.did}">
+                            ${avatar}
+                            <div class="search-info">
+                                <div class="search-handle">${a.handle}</div>
+                                <div class="search-did">${shortenDID(a.did)}</div>
+                            </div>
+                        </div>`;
+                    }).join('');
+                    searchDropdown.style.display = 'block';
+                } catch {}
+            }, 250);
+        });
+
+        searchDropdown.addEventListener('click', e => {
+            const item = e.target.closest('.search-item');
+            if (!item) return;
+            const did = item.dataset.did;
+            searchInput.value = '';
+            searchDropdown.style.display = 'none';
+            // center on the node if it exists in the graph
+            if (fg) {
+                const node = fg.graphData().nodes.find(n => n.id === did);
+                if (node && node.x != null) {
+                    fg.centerAt(node.x, node.y, 800);
+                    fg.zoom(3, 800);
+                }
+            }
+        });
+
+        document.addEventListener('click', e => {
+            if (!document.getElementById('search-wrap').contains(e.target)) {
+                searchDropdown.style.display = 'none';
+            }
+        });
+
+        searchInput.addEventListener('keydown', e => {
+            if (e.key === 'Escape') {
+                searchDropdown.style.display = 'none';
+                searchInput.blur();
+            }
+        });
 
         loadData();
     </script>
