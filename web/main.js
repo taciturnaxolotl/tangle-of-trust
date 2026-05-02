@@ -1,4 +1,5 @@
 import { Cosmograph } from '@cosmograph/cosmograph';
+import { getInternalApi } from '@cosmograph/cosmograph/cosmograph/internal.js';
 import { prepareCosmographData } from '@cosmograph/cosmograph/data-kit';
 import './style.css';
 
@@ -8,16 +9,19 @@ const tooltip = document.getElementById('tooltip');
 const headerStats = document.getElementById('header-stats');
 const searchInput = document.getElementById('search-input');
 const searchDropdown = document.getElementById('search-dropdown');
+const sidebar = document.getElementById('sidebar');
 
 let graphData = null;
 let profileMap = {};
 let cosmograph = null;
-let popup = null;
 let pointIdToIndex = {};
 let resolvingDIDs = new Set();
 let currentRawPoints = [];
 let currentLinks = [];
 let currentNodes = [];
+
+let selectedDID = null;
+let highlightState = null;
 
 let nodeDegrees = {};
 let nodeInVouch = {};
@@ -76,7 +80,6 @@ function buildGraph() {
     const nodeSet = new Set();
     const links = [];
 
-    // deduplicate mutual edges between same pair
     const pairIndex = new Map();
     for (const edge of graphData.edges) {
         if (!edgeFilters[edge.kind]) continue;
@@ -123,7 +126,6 @@ function buildGraph() {
         return { id, label: p.handle || id, handle: p.handle || '', avatar: p.avatar || '' };
     });
 
-    // pre-compute degrees and vouch/denounce counts
     nodeDegrees = {};
     nodeInVouch = {};
     nodeInDenounce = {};
@@ -158,7 +160,6 @@ function buildGraph() {
         }
     }
 
-    // pre-compute node colors
     const isDark = isDarkMode();
     nodeColors = {};
     for (const n of nodes) {
@@ -198,6 +199,285 @@ function edgeWidth(kind, mutual) {
     return mutual ? base + 1 : base;
 }
 
+// --- Highlight ---
+
+function parseRgba(str) {
+    const m = str.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/);
+    if (m) return [parseFloat(m[1])/255, parseFloat(m[2])/255, parseFloat(m[3])/255, m[4] !== undefined ? parseFloat(m[4]) : 1];
+    const hex = str.replace('#', '');
+    if (hex.length >= 6) {
+        const r = parseInt(hex.slice(0,2), 16);
+        const g = parseInt(hex.slice(2,4), 16);
+        const b = parseInt(hex.slice(4,6), 16);
+        return [r/255, g/255, b/255, 1];
+    }
+    return [0.5, 0.5, 0.5, 1];
+}
+
+function computeHighlight(did) {
+    const connectedNodes = new Set();
+    connectedNodes.add(did);
+
+    const connectedLinks = new Set();
+    for (let i = 0; i < currentLinks.length; i++) {
+        const l = currentLinks[i];
+        if (l.source === did || l.target === did) {
+            connectedNodes.add(l.source);
+            connectedNodes.add(l.target);
+            connectedLinks.add(i);
+        }
+    }
+
+    return { did, connectedNodes, connectedLinks };
+}
+
+function applyHighlight() {
+    if (!cosmograph) return;
+    const internal = getInternalApi(cosmograph);
+    const cosmos = internal?.cosmos;
+    if (!cosmos) return;
+
+    if (!highlightState) {
+        cosmos.setConfigPartial({
+            pointGreyoutColor: [-1, -1, -1, -1],
+            isDarkenGreyout: false,
+        });
+        cosmos.unselectPoints();
+
+        // Restore labels and link colors/widths
+        const labels = internal.labels;
+        if (labels?.labelsContainer) labels.labelsContainer.style.display = '';
+
+        const graph = cosmos.graph;
+        const lines = cosmos.lines;
+        if (!graph || !lines) return;
+        for (let i = 0; i < currentLinks.length; i++) {
+            const c = parseRgba(edgeColor(currentLinks[i].kind));
+            graph.linkColors[i*4] = c[0]; graph.linkColors[i*4+1] = c[1]; graph.linkColors[i*4+2] = c[2]; graph.linkColors[i*4+3] = c[3];
+            graph.linkWidths[i] = edgeWidth(currentLinks[i].kind, currentLinks[i].mutual);
+        }
+        lines.updateColor();
+        lines.updateWidth();
+    } else {
+        const dimColor = isDarkMode() ? [0.43, 0.45, 0.55, 0.12] : [0.61, 0.63, 0.69, 0.15];
+        cosmos.setConfigPartial({
+            pointGreyoutColor: dimColor,
+            isDarkenGreyout: true,
+        });
+
+        // Hide all labels for greyed-out nodes
+        const labels = internal.labels;
+        if (labels?.labelsContainer) labels.labelsContainer.style.display = 'none';
+
+        const indices = [];
+        for (const id of highlightState.connectedNodes) {
+            const idx = pointIdToIndex[id];
+            if (idx !== undefined) indices.push(idx);
+        }
+        cosmos.selectPointsByIndices(indices);
+
+        // Dim non-connected links by writing to linkColors/linkWidths directly
+        const graph = cosmos.graph;
+        const lines = cosmos.lines;
+        if (!graph || !lines) return;
+
+        for (let i = 0; i < currentLinks.length; i++) {
+            if (highlightState.connectedLinks.has(i)) {
+                const c = parseRgba(edgeColor(currentLinks[i].kind));
+                graph.linkColors[i*4] = c[0]; graph.linkColors[i*4+1] = c[1]; graph.linkColors[i*4+2] = c[2]; graph.linkColors[i*4+3] = c[3];
+                graph.linkWidths[i] = edgeWidth(currentLinks[i].kind, currentLinks[i].mutual) + 1;
+            } else {
+                const dim = parseRgba('rgba(107,114,128,0.05)');
+                graph.linkColors[i*4] = dim[0]; graph.linkColors[i*4+1] = dim[1]; graph.linkColors[i*4+2] = dim[2]; graph.linkColors[i*4+3] = dim[3];
+                graph.linkWidths[i] = 0.3;
+            }
+        }
+        lines.updateColor();
+        lines.updateWidth();
+    }
+}
+
+function selectNode(did) {
+    selectedDID = did;
+    highlightState = computeHighlight(did);
+    renderSidebar(did);
+    sidebar.classList.add('open');
+    requestAnimationFrame(() => applyHighlight());
+}
+
+function deselectNode() {
+    selectedDID = null;
+    highlightState = null;
+    sidebar.classList.remove('open');
+    applyHighlight();
+}
+
+// --- Sidebar ---
+
+function avatarHtml(avatar, name, size = 40) {
+    if (avatar) {
+        return `<img class="sidebar-avatar" src="/api/proxy/avatar?url=${encodeURIComponent(avatar)}" width="${size}" height="${size}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="sidebar-avatar-fallback" style="display:none;width:${size}px;height:${size}px;font-size:${Math.round(size*0.4)}px">${name.charAt(0).toUpperCase()}</div>`;
+    }
+    return `<div class="sidebar-avatar-fallback" style="width:${size}px;height:${size}px;font-size:${Math.round(size*0.4)}px">${name.charAt(0).toUpperCase()}</div>`;
+}
+
+let sidebarTab = 'outbound';
+
+function renderSidebar(did) {
+    const p = profileMap[did] || {};
+    const handle = p.handle || '';
+    const avatar = p.avatar || '';
+    const name = handle || shortenDID(did);
+
+    const inV = nodeInVouch[did] || 0;
+    const inD = nodeInDenounce[did] || 0;
+    const outV = nodeOutVouch[did] || 0;
+    const outD = nodeOutDenounce[did] || 0;
+    const inF = nodeInFollow[did] || 0;
+    const outF = nodeOutFollow[did] || 0;
+    const total = inV + inD;
+
+    let trustHtml = '';
+    if (total > 0 || outV + outD > 0) {
+        const pct = total > 0 ? Math.round((inV / total) * 100) : null;
+        let pctStr;
+        if (pct !== null) {
+            const c = pct > 90 ? 'kv' : pct > 50 ? 'ks' : 'kd';
+            pctStr = `<span class="${c}">${pct}%</span>`;
+        } else {
+            pctStr = '<span style="color:var(--text-muted)">?</span>';
+        }
+        const inPart = total > 0 ? `<span class="kv">${inV}v</span> <span class="kd">${inD}d</span> in` : '';
+        const outPart = outV + outD > 0 ? `<span class="kv">${outV}v</span> <span class="kd">${outD}d</span> out` : '';
+        const sep = inPart && outPart ? ' · ' : '';
+        trustHtml = `<div class="sidebar-stat">${pctStr} trusted · ${inPart}${sep}${outPart}</div>`;
+    }
+    let followHtml = '';
+    if (inF > 0 || outF > 0) {
+        const inPart = inF > 0 ? `<span class="kf">${inF}f</span> in` : '';
+        const outPart = outF > 0 ? `<span class="kf">${outF}f</span> out` : '';
+        const sep = inPart && outPart ? ' · ' : '';
+        followHtml = `<div class="sidebar-stat">${inPart}${sep}${outPart}</div>`;
+    }
+
+    const profileLink = handle && handle !== '!'
+        ? `<a class="sidebar-link" href="https://tangled.org/@${handle}" target="_blank" rel="noopener">${handle} ↗</a>`
+        : '';
+
+    // Classify links into outbound/inbound, then by vouch/denounce/follow
+    const outVouched = [];
+    const outDenounced = [];
+    const outFollows = [];
+    const inVouched = [];
+    const inDenounced = [];
+    const inFollows = [];
+
+    for (const link of currentLinks) {
+        if (link.source === did) {
+            if (link.kind === 'vouch/denounce') outDenounced.push(link);
+            else if (link.kind === 'vouch/mixed') { outVouched.push(link); outDenounced.push(link); }
+            else if (link.kind === 'vouch/vouch') outVouched.push(link);
+            else outFollows.push(link);
+        } else if (link.target === did) {
+            if (link.kind === 'vouch/denounce') inDenounced.push(link);
+            else if (link.kind === 'vouch/mixed') { inVouched.push(link); inDenounced.push(link); }
+            else if (link.kind === 'vouch/vouch') inVouched.push(link);
+            else inFollows.push(link);
+        }
+    }
+
+    const renderConnections = (links, direction) => {
+        if (links.length === 0) return '<div class="sidebar-empty">None</div>';
+        return links.map(l => {
+            const otherId = direction === 'out' ? l.target : l.source;
+            const otherP = profileMap[otherId] || {};
+            const otherName = otherP.handle || shortenDID(otherId);
+            const otherAvatar = otherP.avatar || '';
+            const kindClass = l.kind === 'vouch/denounce' ? 'kd' : l.kind === 'vouch/vouch' ? 'kv' : l.kind === 'vouch/mixed' ? 'ks' : 'kf';
+            const kindLabel = l.kind === 'vouch/denounce' ? 'denounces' : l.kind === 'vouch/vouch' ? 'vouches' : l.kind === 'vouch/mixed' ? 'mixed' : 'follows';
+            const mutualTag = l.mutual ? ' <span class="sidebar-mutual">mutual</span>' : '';
+            return `<div class="sidebar-conn" data-did="${otherId}">
+                ${avatarHtml(otherAvatar, otherName, 28)}
+                <div class="sidebar-conn-info">
+                    <span class="sidebar-conn-name">${otherName}</span>
+                    <span class="sidebar-conn-kind ${kindClass}">${kindLabel}${mutualTag}</span>
+                </div>
+            </div>`;
+        }).join('');
+    };
+
+    const outTotal = outVouched.length + outDenounced.length + outFollows.length;
+    const inTotal = inVouched.length + inDenounced.length + inFollows.length;
+    const activeTab = sidebarTab;
+
+    const tabContent = activeTab === 'outbound'
+        ? `<div class="sidebar-subsection">
+                <div class="sidebar-subsection-title"><span class="kv">Vouched</span> <span class="sidebar-count">${outVouched.length}</span></div>
+                ${renderConnections(outVouched, 'out')}
+            </div>
+            <div class="sidebar-subsection">
+                <div class="sidebar-subsection-title"><span class="kd">Denounced</span> <span class="sidebar-count">${outDenounced.length}</span></div>
+                ${renderConnections(outDenounced, 'out')}
+            </div>
+            ${outFollows.length > 0 ? `<div class="sidebar-subsection">
+                <div class="sidebar-subsection-title"><span class="kf">Follows</span> <span class="sidebar-count">${outFollows.length}</span></div>
+                ${renderConnections(outFollows, 'out')}
+            </div>` : ''}`
+        : `<div class="sidebar-subsection">
+                <div class="sidebar-subsection-title"><span class="kv">Vouched by</span> <span class="sidebar-count">${inVouched.length}</span></div>
+                ${renderConnections(inVouched, 'in')}
+            </div>
+            <div class="sidebar-subsection">
+                <div class="sidebar-subsection-title"><span class="kd">Denounced by</span> <span class="sidebar-count">${inDenounced.length}</span></div>
+                ${renderConnections(inDenounced, 'in')}
+            </div>
+            ${inFollows.length > 0 ? `<div class="sidebar-subsection">
+                <div class="sidebar-subsection-title"><span class="kf">Followed by</span> <span class="sidebar-count">${inFollows.length}</span></div>
+                ${renderConnections(inFollows, 'in')}
+            </div>` : ''}`;
+
+    sidebar.innerHTML = `
+        <div class="sidebar-header">
+            <div class="sidebar-profile">
+                ${avatarHtml(avatar, name)}
+                <div>
+                    <div class="sidebar-name">${name}</div>
+                    ${profileLink}
+                    ${handle ? `<div class="sidebar-did">${shortenDID(did)}</div>` : ''}
+                </div>
+            </div>
+            ${trustHtml}
+            ${followHtml}
+            <button class="sidebar-close" id="sidebar-close">✕</button>
+        </div>
+        <div class="sidebar-tabs">
+            <button class="sidebar-tab ${activeTab === 'outbound' ? 'active' : ''}" data-tab="outbound">Outbound <span class="sidebar-count">${outTotal}</span></button>
+            <button class="sidebar-tab ${activeTab === 'inbound' ? 'active' : ''}" data-tab="inbound">Inbound <span class="sidebar-count">${inTotal}</span></button>
+        </div>
+        <div class="sidebar-sections">
+            ${tabContent}
+        </div>
+    `;
+
+    document.getElementById('sidebar-close')?.addEventListener('click', deselectNode);
+
+    sidebar.querySelectorAll('.sidebar-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            sidebarTab = tab.dataset.tab;
+            renderSidebar(did);
+        });
+    });
+
+    sidebar.querySelectorAll('.sidebar-conn').forEach(el => {
+        el.addEventListener('click', () => {
+            const connDid = el.dataset.did;
+            if (connDid) selectNode(connDid);
+        });
+    });
+}
+
+// --- Data loading ---
+
 async function loadData() {
     const resp = await fetch('/api/graph');
     graphData = await resp.json();
@@ -225,16 +505,15 @@ async function initGraph() {
     currentNodes = nodes;
     currentLinks = links;
 
-    // Build Cosmograph data format
     const rawPoints = nodes.map(n => ({
         id: n.id,
         color: nodeColors[n.id] || '#9ca0b0',
-        size: Math.max(5, Math.min(20, 4 * Math.log2((nodeDegrees[n.id] || 0) + 2))),
+        size: Math.max(20, Math.min(50, 10 * Math.log2((nodeDegrees[n.id] || 0) + 2))),
         label: n.handle || '',
         imageUrl: n.avatar ? `/api/proxy/avatar?url=${encodeURIComponent(n.avatar)}` : '',
     }));
 
-    const rawLinks = links.map(l => ({
+    const rawLinks = links.map((l, i) => ({
         source: l.source,
         target: l.target,
         color: edgeColor(l.kind),
@@ -252,7 +531,7 @@ async function initGraph() {
             pointSizeStrategy: 'direct',
             pointLabelBy: 'label',
             pointImageUrlBy: 'imageUrl',
-            pointImageSize: 20,
+            pointImageSize: 50,
             hidePointShapesForLoadedImages: true,
         },
         links: {
@@ -271,10 +550,8 @@ async function initGraph() {
 
     const { points, links: prepLinks, cosmographConfig } = result;
 
-    // Store for callback access after filter toggles
     currentRawPoints = rawPoints;
 
-    // Build index map for lookup
     pointIdToIndex = {};
     for (let i = 0; i < rawPoints.length; i++) {
         pointIdToIndex[rawPoints[i].id] = i;
@@ -295,18 +572,18 @@ async function initGraph() {
         showHoveredPointLabel: true,
         hoveredPointLabelClassName: 'hovered-label',
         focusPointOnClick: true,
-        selectPointOnClick: 'single',
         pointDefaultColor: isDark ? '#6e738d' : '#9ca0b0',
         pointColorStrategy: 'direct',
-        pointSizeRange: [5, 20],
+        pointSizeRange: [20, 50],
         linkDefaultColor: isDark ? 'rgba(107,114,128,0.2)' : 'rgba(107,114,128,0.2)',
         linkDefaultWidth: 1,
         linkWidthStrategy: 'direct',
-        linkWidthRange: [1, 2],
+        linkWidthRange: [1, 3],
         enableSimulation: true,
         onPointMouseOver: (pointIndex) => {
             const id = currentRawPoints[pointIndex]?.id;
             if (!id) return;
+            if (highlightState && !highlightState.connectedNodes.has(id)) return;
             showNodeTooltip(id, pointIndex);
         },
         onPointMouseOut: () => {
@@ -315,14 +592,19 @@ async function initGraph() {
         onPointClick: (pointIndex) => {
             const id = currentRawPoints[pointIndex]?.id;
             if (!id) return;
-            const p = profileMap[id];
-            if (p?.handle && p.handle !== '!') {
-                window.open(`https://tangled.org/@${p.handle}`, '_blank');
+            if (selectedDID === id) {
+                deselectNode();
+            } else {
+                selectNode(id);
             }
+        },
+        onBackgroundClick: () => {
+            if (selectedDID) deselectNode();
         },
         onLinkMouseOver: (linkIndex) => {
             const link = currentLinks[linkIndex];
             if (!link) return;
+            if (highlightState && !highlightState.connectedLinks.has(linkIndex)) return;
             showLinkTooltip(link);
         },
         onLinkMouseOut: () => {
@@ -339,9 +621,16 @@ async function initGraph() {
             e.preventDefault();
             cosmograph?.fitView(400, 30);
         }
+        if (e.code === 'Escape' && selectedDID) {
+            deselectNode();
+        }
     });
 
     updateStats(currentNodes, currentLinks);
+
+    if (highlightState) {
+        applyHighlight();
+    }
 }
 
 function showNodeTooltip(did, pointIndex) {
@@ -505,6 +794,7 @@ searchDropdown.addEventListener('click', e => {
     if (cosmograph) {
         const idx = pointIdToIndex[did];
         if (idx !== undefined) {
+            selectNode(did);
             cosmograph.zoomToPoint(idx, 800, 6);
         }
     }

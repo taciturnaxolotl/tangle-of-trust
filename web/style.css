@@ -282,3 +282,181 @@ header nav {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 11px;
 }
+
+#sidebar {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 320px;
+    height: 100%;
+    background: var(--bg-card);
+    border-left: 1px solid var(--border-default);
+    z-index: 25;
+    overflow-y: auto;
+    transform: translateX(100%);
+    transition: transform 0.2s ease;
+    display: flex;
+    flex-direction: column;
+}
+#sidebar.open {
+    transform: translateX(0);
+}
+
+.sidebar-header {
+    padding: 1rem;
+    border-bottom: 1px solid var(--border-default);
+    position: relative;
+    flex-shrink: 0;
+}
+
+.sidebar-profile {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+    padding-right: 1.5rem;
+}
+
+.sidebar-avatar {
+    width: 40px; height: 40px; border-radius: 50%;
+    border: 2px solid var(--border-default);
+    object-fit: cover; flex-shrink: 0;
+}
+.sidebar-avatar-fallback {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: var(--bg-input); border: 2px solid var(--border-default);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1rem; color: var(--text-muted); flex-shrink: 0;
+    font-weight: 600;
+}
+
+.sidebar-name {
+    font-weight: 700;
+    font-size: 1rem;
+    color: var(--text-primary);
+    line-height: 1.2;
+}
+.sidebar-link {
+    font-size: 0.8125rem;
+    color: var(--follow);
+    text-decoration: none;
+    display: block;
+    line-height: 1.3;
+}
+.sidebar-link:hover { text-decoration: underline; }
+.sidebar-did {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    line-height: 1.3;
+}
+.sidebar-stat {
+    font-size: 0.75rem;
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    color: var(--text-secondary);
+    margin-top: 0.25rem;
+}
+
+.sidebar-close {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.75rem;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 0.25rem;
+    line-height: 1;
+    border-radius: 0.25rem;
+}
+.sidebar-close:hover { color: var(--text-primary); background: var(--bg-input); }
+
+.sidebar-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border-default);
+    flex-shrink: 0;
+}
+.sidebar-tab {
+    flex: 1;
+    padding: 0.5rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    font-family: inherit;
+    color: var(--text-muted);
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+}
+.sidebar-tab:hover { color: var(--text-secondary); }
+.sidebar-tab.active {
+    color: var(--text-primary);
+    border-bottom-color: var(--text-primary);
+}
+
+.sidebar-sections {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.sidebar-subsection {
+    border-bottom: 1px solid var(--border-default);
+}
+.sidebar-subsection:last-child { border-bottom: none; }
+
+.sidebar-subsection-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 0.375rem 1rem;
+    background: var(--bg-input);
+    border-bottom: 1px solid var(--border-default);
+}
+.sidebar-count {
+    color: var(--text-secondary);
+    font-weight: 400;
+}
+
+.sidebar-conn {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 1rem;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+.sidebar-conn:hover { background: var(--bg-input); }
+.sidebar-conn .sidebar-avatar { width: 28px; height: 28px; border-width: 1px; }
+.sidebar-conn .sidebar-avatar-fallback { width: 28px; height: 28px; border-width: 1px; }
+
+.sidebar-conn-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+}
+.sidebar-conn-name {
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.sidebar-conn-kind {
+    font-size: 0.6875rem;
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+}
+.sidebar-mutual {
+    font-size: 0.625rem;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.sidebar-empty {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    padding: 0.5rem 1rem;
+}
