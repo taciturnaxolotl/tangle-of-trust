@@ -297,12 +297,23 @@ function applyHighlight() {
     }
 }
 
+function resizeCosmos() {
+    if (!cosmograph) return;
+    const internal = getInternalApi(cosmograph);
+    const cosmos = internal?.cosmos;
+    if (cosmos) cosmos.resizeCanvas();
+}
+
 function selectNode(did) {
     selectedDID = did;
     highlightState = computeHighlight(did);
     renderSidebar(did);
     sidebar.classList.add('open');
     requestAnimationFrame(() => applyHighlight());
+    sidebar.addEventListener('transitionend', function handler() {
+        resizeCosmos();
+        sidebar.removeEventListener('transitionend', handler);
+    });
 }
 
 function deselectNode() {
@@ -310,6 +321,10 @@ function deselectNode() {
     highlightState = null;
     sidebar.classList.remove('open');
     applyHighlight();
+    sidebar.addEventListener('transitionend', function handler() {
+        resizeCosmos();
+        sidebar.removeEventListener('transitionend', handler);
+    });
 }
 
 // --- Sidebar ---
@@ -473,6 +488,40 @@ function renderSidebar(did) {
             const connDid = el.dataset.did;
             if (connDid) selectNode(connDid);
         });
+    });
+}
+
+function showOffGraphUser(did) {
+    const p = profileMap[did] || {};
+    const handle = p.handle || '';
+    const avatar = p.avatar || '';
+    const name = handle || shortenDID(did);
+
+    const profileLink = handle && handle !== '!'
+        ? `<a class="sidebar-link" href="https://tangled.org/@${handle}" target="_blank" rel="noopener">${handle} ↗</a>`
+        : '';
+
+    sidebar.innerHTML = `
+        <div class="sidebar-header">
+            <div class="sidebar-profile">
+                ${avatarHtml(avatar, name)}
+                <div>
+                    <div class="sidebar-name">${name}</div>
+                    ${profileLink}
+                    ${handle ? `<div class="sidebar-did">${shortenDID(did)}</div>` : ''}
+                </div>
+            </div>
+            <div class="sidebar-stat" style="color:var(--text-muted)">Not in current graph</div>
+            <button class="sidebar-close" id="sidebar-close">✕</button>
+        </div>
+    `;
+
+    sidebar.classList.add('open');
+    document.getElementById('sidebar-close')?.addEventListener('click', deselectNode);
+
+    sidebar.addEventListener('transitionend', function handler() {
+        resizeCosmos();
+        sidebar.removeEventListener('transitionend', handler);
     });
 }
 
@@ -796,6 +845,8 @@ searchDropdown.addEventListener('click', e => {
         if (idx !== undefined) {
             selectNode(did);
             cosmograph.zoomToPoint(idx, 800, 6);
+        } else {
+            showOffGraphUser(did);
         }
     }
 });
