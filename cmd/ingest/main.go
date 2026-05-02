@@ -33,6 +33,15 @@ func main() {
 	}
 	defer store.Close()
 
+	total, vouches, denounces, follows, knot, _ := store.Stats()
+	slog.Info("database loaded",
+		"vouches", vouches,
+		"denounces", denounces,
+		"follows", follows,
+		"knot_members", knot,
+		"total_records", total,
+	)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,13 +26,16 @@ const (
 	VouchCollection      = "sh.tangled.graph.vouch"
 	FollowCollection     = "sh.tangled.graph.follow"
 	KnotMemberCollection = "sh.tangled.knot.member"
+	TangledProfileCollection = "sh.tangled.actor.profile"
 	DefaultKnotDID       = "did:plc:wshs7t2adsemcrrd4snkeqli"
+	ListReposByCollectionURL = "https://lightrail.microcosm.blue/xrpc/com.atproto.sync.listReposByCollection"
 	ListRecordsLimit     = 100
-	MaxWorkers           = 20
+	MaxWorkers           = 5
 	ProfileBatchSize     = 50
 	ProfileInterval      = 30 * time.Second
-	MaxRetries           = 3
+	MaxRetries           = 5
 	RetryBaseDelay       = 2 * time.Second
+	RateLimitDelay       = 10 * time.Second
 )
 
 var httpClient = &http.Client{
@@ -69,7 +73,7 @@ func isValidDID(s string) bool {
 func main() {
 	dbPath := flag.String("db", "tangle.db", "path to sqlite database")
 	workers := flag.Int("workers", MaxWorkers, "number of parallel workers")
-	knotDID := flag.String("knot", DefaultKnotDID, "default knot DID to seed members from")
+	knotDID := flag.String("knot", DefaultKnotDID, "fallback knot DID to seed members from")
 	flag.Parse()
 	args := flag.Args()
 
@@ -96,26 +100,41 @@ func main() {
 	}()
 
 	seedDIDs := args
-	if len(seedDIDs) == 0 {
-		seedDIDs = bootstrapFromDB(store)
+
+	// primary: crawl all tangled DIDs via listReposByCollection
+	slog.Info("fetching tangled user list from bsky.network")
+	tangledDIDs, err := fetchTangledDIDs(ctx)
+	if err != nil {
+		slog.Warn("failed to fetch tangled DIDs from bsky.network", "error", err)
+	} else {
+		slog.Info("found tangled DIDs", "count", len(tangledDIDs))
+		seedDIDs = append(seedDIDs, tangledDIDs...)
 	}
 
-	slog.Info("seeding from knot members", "knot", *knotDID)
-	knotMembers, err := fetchKnotMembers(ctx, *knotDID)
-	if err != nil {
-		slog.Warn("failed to fetch knot members, continuing without", "error", err)
-	} else {
-		slog.Info("found knot members", "count", len(knotMembers))
-		for _, km := range knotMembers {
-			seedDIDs = append(seedDIDs, km.MemberDID)
-			if err := store.UpsertKnotMember(km); err != nil {
-				slog.Warn("failed to store knot member", "error", err)
+	// fallback: knot members
+	if len(seedDIDs) == 0 {
+		slog.Info("seeding from knot members", "knot", *knotDID)
+		knotMembers, err := fetchKnotMembers(ctx, *knotDID)
+		if err != nil {
+			slog.Warn("failed to fetch knot members", "error", err)
+		} else {
+			slog.Info("found knot members", "count", len(knotMembers))
+			for _, km := range knotMembers {
+				seedDIDs = append(seedDIDs, km.MemberDID)
+				if err := store.UpsertKnotMember(km); err != nil {
+					slog.Warn("failed to store knot member", "error", err)
+				}
 			}
 		}
 	}
 
+	// fallback: existing DB DIDs
 	if len(seedDIDs) == 0 {
-		slog.Error("no seed DIDs; pass DIDs as arguments or ensure knot is reachable")
+		seedDIDs = bootstrapFromDB(store)
+	}
+
+	if len(seedDIDs) == 0 {
+		slog.Error("no seed DIDs; pass DIDs as arguments or ensure network is reachable")
 		os.Exit(1)
 	}
 
@@ -130,7 +149,7 @@ func main() {
 
 	slog.Info("starting snowball backfill", "seeds", len(cleanSeeds), "workers", *workers)
 
-	pdsCache := &sync.Map{}
+	pdsCache := &pdsLimiter{urls: &sync.Map{}}
 
 	visited := sync.Map{}
 	didCh := make(chan string, 10000)
@@ -296,8 +315,68 @@ func bootstrapFromDB(store *db.Store) []string {
 	return dids
 }
 
+func fetchTangledDIDs(ctx context.Context) ([]string, error) {
+	var dids []string
+	cursor := ""
+
+	for {
+		select {
+		case <-ctx.Done():
+			return dids, ctx.Err()
+		default:
+		}
+
+		u := fmt.Sprintf("%s?collection=%s&limit=1000", ListReposByCollectionURL, TangledProfileCollection)
+		if cursor != "" {
+			u += "&cursor=" + cursor
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+		if err != nil {
+			return dids, err
+		}
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return dids, err
+		}
+
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			return dids, fmt.Errorf("listReposByCollection returned %d", resp.StatusCode)
+		}
+
+		var result struct {
+			Cursor string `json:"cursor"`
+			Repos  []struct {
+				DID string `json:"did"`
+			} `json:"repos"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return dids, err
+		}
+
+		for _, r := range result.Repos {
+			if isValidDID(r.DID) {
+				dids = append(dids, r.DID)
+			}
+		}
+
+		slog.Info("fetched tangled DIDs", "count", len(dids), "cursor", result.Cursor != "")
+
+		if result.Cursor == "" || len(result.Repos) == 0 {
+			break
+		}
+		cursor = result.Cursor
+	}
+
+	return dids, nil
+}
+
 func fetchKnotMembers(ctx context.Context, knotDID string) ([]db.KnotMember, error) {
-	pdsURL, err := cachedResolvePDS(ctx, nil, knotDID)
+	pdsURL, err := resolvePDS(ctx, knotDID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve PDS for knot: %w", err)
 	}
@@ -350,57 +429,66 @@ func fetchKnotMembers(ctx context.Context, knotDID string) ([]db.KnotMember, err
 	return members, nil
 }
 
-func backfillDID(ctx context.Context, store *db.Store, pdsCache *sync.Map, did string, vouchCount, followCount *atomic.Int64) ([]string, error) {
-	pdsURL, err := cachedResolvePDS(ctx, pdsCache, did)
+func backfillDID(ctx context.Context, store *db.Store, limiter *pdsLimiter, did string, vouchCount, followCount *atomic.Int64) ([]string, error) {
+	pdsURL, err := limiter.Get(ctx, did)
 	if err != nil {
 		return nil, fmt.Errorf("resolve PDS: %w", err)
 	}
 
+	// wait if this PDS is rate-limited
+	if err := limiter.WaitIfLimited(ctx, pdsURL); err != nil {
+		return nil, err
+	}
+
 	var newDIDs []string
 
-	type result struct {
-		dids  []string
-		count int
-		err   error
+	// always fetch vouches
+	vouchDIDs, vouchN, err := fetchVouches(ctx, store, limiter, pdsURL, did)
+	if err != nil {
+		if rle, ok := err.(*rateLimitError); ok {
+			limiter.RateLimited(pdsURL, rle.retryAfter)
+		}
+		return newDIDs, fmt.Errorf("fetch vouches: %w", err)
+	}
+	vouchCount.Add(int64(vouchN))
+	newDIDs = append(newDIDs, vouchDIDs...)
+
+	// only fetch follows if this DID is on tangled
+	onTangled, err := hasTangledProfile(ctx, pdsURL, did)
+	if err != nil {
+		slog.Warn("tangled profile check failed", "did", did, "error", err)
+		onTangled = false
 	}
 
-	vouchCh := make(chan result, 1)
-	followCh := make(chan result, 1)
-
-	go func() {
-		dids, count, err := fetchVouches(ctx, store, pdsURL, did)
-		vouchCh <- result{dids, count, err}
-	}()
-
-	go func() {
-		dids, count, err := fetchFollows(ctx, store, pdsURL, did)
-		followCh <- result{dids, count, err}
-	}()
-
-	vr := <-vouchCh
-	if vr.err != nil {
-		return newDIDs, fmt.Errorf("fetch vouches: %w", vr.err)
-	}
-	vouchCount.Add(int64(vr.count))
-	newDIDs = append(newDIDs, vr.dids...)
-
-	fr := <-followCh
-	if fr.err != nil {
-		slog.Warn("fetch follows failed", "did", did, "error", fr.err)
-	} else {
-		followCount.Add(int64(fr.count))
-		newDIDs = append(newDIDs, fr.dids...)
+	if onTangled {
+		// wait again in case vouch fetch hit a rate limit
+		if err := limiter.WaitIfLimited(ctx, pdsURL); err != nil {
+			return newDIDs, err
+		}
+		followDIDs, followN, err := fetchFollows(ctx, store, limiter, pdsURL, did)
+		if err != nil {
+			if rle, ok := err.(*rateLimitError); ok {
+				limiter.RateLimited(pdsURL, rle.retryAfter)
+			}
+			slog.Warn("fetch follows failed", "did", did, "error", err)
+		} else {
+			followCount.Add(int64(followN))
+			newDIDs = append(newDIDs, followDIDs...)
+		}
 	}
 
 	return newDIDs, nil
 }
 
-func fetchVouches(ctx context.Context, store *db.Store, pdsURL, did string) ([]string, int, error) {
+func fetchVouches(ctx context.Context, store *db.Store, limiter *pdsLimiter, pdsURL, did string) ([]string, int, error) {
 	var newDIDs []string
 	var vouches []db.Vouch
 	cursor := ""
 
 	for {
+		if err := limiter.WaitIfLimited(ctx, pdsURL); err != nil {
+			return newDIDs, 0, err
+		}
 		records, nextCursor, err := listRecordsWithRetry(ctx, pdsURL, did, VouchCollection, cursor)
 		if err != nil {
 			return newDIDs, 0, err
@@ -451,12 +539,15 @@ func fetchVouches(ctx context.Context, store *db.Store, pdsURL, did string) ([]s
 	return newDIDs, len(vouches), nil
 }
 
-func fetchFollows(ctx context.Context, store *db.Store, pdsURL, did string) ([]string, int, error) {
+func fetchFollows(ctx context.Context, store *db.Store, limiter *pdsLimiter, pdsURL, did string) ([]string, int, error) {
 	var newDIDs []string
 	var follows []db.Follow
 	cursor := ""
 
 	for {
+		if err := limiter.WaitIfLimited(ctx, pdsURL); err != nil {
+			return newDIDs, 0, err
+		}
 		records, nextCursor, err := listRecordsWithRetry(ctx, pdsURL, did, FollowCollection, cursor)
 		if err != nil {
 			return newDIDs, 0, err
@@ -501,6 +592,14 @@ func fetchFollows(ctx context.Context, store *db.Store, pdsURL, did string) ([]s
 	return newDIDs, len(follows), nil
 }
 
+type rateLimitError struct {
+	retryAfter time.Duration
+}
+
+func (e *rateLimitError) Error() string {
+	return fmt.Sprintf("rate limited, retry after %s", e.retryAfter)
+}
+
 type Record struct {
 	URI   string
 	Value json.RawMessage
@@ -508,9 +607,13 @@ type Record struct {
 
 func listRecordsWithRetry(ctx context.Context, pdsURL, did, collection, cursor string) ([]Record, string, error) {
 	var lastErr error
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
+	for attempt := 0; attempt < MaxRetries; attempt++ {
 		if attempt > 0 {
 			delay := RetryBaseDelay * time.Duration(math.Pow(2, float64(attempt-1)))
+			if rle, ok := lastErr.(*rateLimitError); ok {
+				delay = rle.retryAfter
+			}
+			slog.Info("retrying", "collection", collection, "did", did, "attempt", attempt+1, "delay", delay)
 			select {
 			case <-ctx.Done():
 				return nil, "", ctx.Err()
@@ -522,6 +625,10 @@ func listRecordsWithRetry(ctx context.Context, pdsURL, did, collection, cursor s
 			return records, nextCursor, nil
 		}
 		lastErr = err
+		// don't retry non-429 errors more than 3 times
+		if _, ok := err.(*rateLimitError); !ok && attempt >= 2 {
+			break
+		}
 	}
 	return nil, "", lastErr
 }
@@ -544,12 +651,25 @@ func listRecords(ctx context.Context, pdsURL, did, collection, cursor string) ([
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 429 {
+		retryAfter := RateLimitDelay
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+				retryAfter = time.Duration(secs) * time.Second
+			}
+		}
+		resp.Body.Close()
+		return nil, "", &rateLimitError{retryAfter: retryAfter}
+	}
+
 	if resp.StatusCode == 404 {
+		resp.Body.Close()
 		return nil, "", nil
 	}
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		return nil, "", fmt.Errorf("listRecords %s returned %d: %s", collection, resp.StatusCode, truncate(string(body), 200))
 	}
 
@@ -566,11 +686,44 @@ func listRecords(ctx context.Context, pdsURL, did, collection, cursor string) ([
 	return records, result.Cursor, nil
 }
 
-func cachedResolvePDS(ctx context.Context, cache *sync.Map, did string) (string, error) {
-	if cache != nil {
-		if v, ok := cache.Load(did); ok {
-			return v.(string), nil
-		}
+func hasTangledProfile(ctx context.Context, pdsURL, did string) (bool, error) {
+	u := fmt.Sprintf("%s/xrpc/com.atproto.repo.listRecords?repo=%s&collection=%s&limit=1",
+		pdsURL, did, TangledProfileCollection)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return false, err
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		return false, nil
+	}
+	if resp.StatusCode != 200 {
+		return false, fmt.Errorf("tangled profile check returned %d", resp.StatusCode)
+	}
+
+	var result ListRecordsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, err
+	}
+
+	return len(result.Records) > 0, nil
+}
+
+type pdsLimiter struct {
+	urls *sync.Map // did -> pdsURL
+	until sync.Map   // pdsURL -> time.Time (rate-limited until)
+}
+
+func (p *pdsLimiter) Get(ctx context.Context, did string) (string, error) {
+	if v, ok := p.urls.Load(did); ok {
+		return v.(string), nil
 	}
 
 	pdsURL, err := resolvePDS(ctx, did)
@@ -578,10 +731,30 @@ func cachedResolvePDS(ctx context.Context, cache *sync.Map, did string) (string,
 		return "", err
 	}
 
-	if cache != nil {
-		cache.Store(did, pdsURL)
-	}
+	p.urls.Store(did, pdsURL)
 	return pdsURL, nil
+}
+
+func (p *pdsLimiter) RateLimited(pdsURL string, dur time.Duration) {
+	p.until.Store(pdsURL, time.Now().Add(dur))
+}
+
+func (p *pdsLimiter) WaitIfLimited(ctx context.Context, pdsURL string) error {
+	if v, ok := p.until.Load(pdsURL); ok {
+		deadline := v.(time.Time)
+		if wait := time.Until(deadline); wait > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+			}
+		}
+	}
+	return nil
+}
+
+func cachedResolvePDS(ctx context.Context, cache *pdsLimiter, did string) (string, error) {
+	return cache.Get(ctx, did)
 }
 
 func resolvePDS(ctx context.Context, did string) (string, error) {

@@ -209,6 +209,8 @@ func BatchResolveAndStore(ctx context.Context, store *db.Store, dids []string) (
 		}
 
 		if p.Handle == "" && p.AvatarURL == "" {
+			// tombstone: mark as unresolvable so we don't retry
+			store.UpsertProfile(db.Profile{DID: did, Handle: "!", UpdatedAt: time.Now()})
 			continue
 		}
 
