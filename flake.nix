@@ -62,7 +62,7 @@
       apps = forAllSystems (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/tangle-ingest";
+          program = "${self.packages.${system}.default}/bin/ingest";
         };
       });
 
