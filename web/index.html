@@ -234,7 +234,7 @@
             color: var(--text-muted);
             align-items: center;
         }
-        #stats-row span { color: var(--text-secondary); margin-right: 3px; }
+        #stats-row span { color: var(--text-secondary); margin-left: 4px; margin-right: 3px; }
 
         #loading {
             position: fixed;
@@ -746,12 +746,18 @@
             const total = inV + inD;
             let trustLine = '';
             if (total > 0 || outV + outD > 0) {
-                const pct = total > 0 ? Math.round((inV / total) * 100) : 100;
-                const cls = pct > 90 ? 'kv' : pct > 50 ? 'ks' : 'kd';
+                const pct = total > 0 ? Math.round((inV / total) * 100) : null;
+                let pctStr;
+                if (pct !== null) {
+                    const c = pct > 90 ? 'kv' : pct > 50 ? 'ks' : 'kd';
+                    pctStr = `<span class="${c}">${pct}%</span>`;
+                } else {
+                    pctStr = '<span style="color:var(--text-muted)">?</span>';
+                }
                 const inPart = total > 0 ? `<span class="kv">${inV}v</span> <span class="kd">${inD}d</span> in` : '';
                 const outPart = outV + outD > 0 ? `<span class="kv">${outV}v</span> <span class="kd">${outD}d</span> out` : '';
                 const sep = inPart && outPart ? ' · ' : '';
-                trustLine = `<div style="margin-top:4px;font-size:0.6875rem"><span class="${cls}">${pct}%</span> trusted · ${inPart}${sep}${outPart}</div>`;
+                trustLine = `<div style="margin-top:4px;font-size:0.6875rem">${pctStr} trusted · ${inPart}${sep}${outPart}</div>`;
             }
 
             tooltip.innerHTML = `
