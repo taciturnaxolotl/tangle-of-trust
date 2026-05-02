@@ -310,7 +310,7 @@ func (s *Store) ProfilesNeedingResolution(limit int) ([]string, error) {
 		) d
 		WHERE d.did LIKE 'did:%'
 		AND d.did NOT IN (
-			SELECT did FROM profiles WHERE handle != '' AND avatar_url != ''
+			SELECT did FROM profiles WHERE handle != '' AND handle != '!'
 		)
 		AND d.did NOT IN (
 			SELECT did FROM profiles WHERE handle = '!'
