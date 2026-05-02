@@ -86,9 +86,10 @@ function buildGraph() {
         const kind = edge.kind === 'vouch/vouch' ? 'vouch' : edge.kind === 'vouch/denounce' ? 'denounce' : 'follow';
         if (kind === 'vouch' || kind === 'denounce') {
             if (!entry[kind]) {
-                entry[kind] = { source: edge.source, target: edge.target, kind: edge.kind, reason: edge.reason, time: edge.time, mutual: false };
+                entry[kind] = { source: edge.source, target: edge.target, kind: edge.kind, reasons: [{ source: edge.source, reason: edge.reason }], time: edge.time, mutual: false };
             } else {
                 entry[kind].mutual = true;
+                entry[kind].reasons.push({ source: edge.source, reason: edge.reason });
             }
         } else {
             if (!entry.follows) entry.follows = [];
@@ -99,7 +100,7 @@ function buildGraph() {
     for (const entry of pairIndex.values()) {
         if (entry.vouch && entry.denounce) {
             nodeSet.add(entry.vouch.source); nodeSet.add(entry.vouch.target);
-            links.push({ source: entry.vouch.source, target: entry.vouch.target, kind: 'vouch/mixed', reason: entry.vouch.reason, time: entry.vouch.time, mutual: true });
+            links.push({ source: entry.vouch.source, target: entry.vouch.target, kind: 'vouch/mixed', reasons: [...entry.vouch.reasons, ...entry.denounce.reasons], time: entry.vouch.time, mutual: true });
         } else if (entry.vouch) {
             nodeSet.add(entry.vouch.source); nodeSet.add(entry.vouch.target);
             links.push(entry.vouch);
@@ -361,6 +362,20 @@ function showNodeTooltip(did, pointIndex) {
     tooltip.style.display = 'block';
 }
 
+function formatReasons(link) {
+    if (link.reasons && link.reasons.length > 0) {
+        const withReasons = link.reasons.filter(r => r.reason);
+        if (withReasons.length === 0) return '';
+        return '<div style="margin-top:4px">' + withReasons.map(r => {
+            const p = profileMap[r.source] || {};
+            const name = p.handle || shortenDID(r.source);
+            return `<div style="color:var(--text-muted);word-break:break-word"><span style="color:var(--text-secondary)">${name}:</span> ${r.reason}</div>`;
+        }).join('') + '</div>';
+    }
+    if (link.reason) return `<div style="margin-top:4px;color:var(--text-muted);word-break:break-word">${link.reason}</div>`;
+    return '';
+}
+
 function showLinkTooltip(link) {
     const srcId = link.source;
     const tgtId = link.target;
@@ -389,7 +404,7 @@ function showLinkTooltip(link) {
             ${tgtAvatar}
             <span class="did">${tgtP.handle || shortenDID(tgtId)}</span>
         </div>
-        ${link.reason ? `<div style="margin-top:4px;color:var(--text-muted);word-break:break-word">${link.reason}</div>` : ''}
+        ${formatReasons(link)}
     `;
     tooltip.style.display = 'block';
 }
