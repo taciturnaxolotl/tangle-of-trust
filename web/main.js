@@ -24,6 +24,8 @@ let nodeInVouch = {};
 let nodeInDenounce = {};
 let nodeOutVouch = {};
 let nodeOutDenounce = {};
+let nodeInFollow = {};
+let nodeOutFollow = {};
 let nodeColors = {};
 
 const edgeFilters = {
@@ -127,13 +129,33 @@ function buildGraph() {
     nodeInDenounce = {};
     nodeOutVouch = {};
     nodeOutDenounce = {};
-    for (const n of nodes) { nodeDegrees[n.id] = 0; nodeInVouch[n.id] = 0; nodeInDenounce[n.id] = 0; nodeOutVouch[n.id] = 0; nodeOutDenounce[n.id] = 0; }
+    nodeInFollow = {};
+    nodeOutFollow = {};
+    for (const n of nodes) { nodeDegrees[n.id] = 0; nodeInVouch[n.id] = 0; nodeInDenounce[n.id] = 0; nodeOutVouch[n.id] = 0; nodeOutDenounce[n.id] = 0; nodeInFollow[n.id] = 0; nodeOutFollow[n.id] = 0; }
     for (const link of links) {
         nodeDegrees[link.source] = (nodeDegrees[link.source] || 0) + 1;
         nodeDegrees[link.target] = (nodeDegrees[link.target] || 0) + 1;
-        if (link.kind === 'vouch/vouch') { nodeInVouch[link.target]++; nodeOutVouch[link.source]++; }
-        else if (link.kind === 'vouch/denounce') { nodeInDenounce[link.target]++; nodeOutDenounce[link.source]++; }
-        else if (link.kind === 'vouch/mixed') { nodeInVouch[link.target]++; nodeInDenounce[link.target]++; nodeOutVouch[link.source]++; nodeOutDenounce[link.source]++; }
+        if (link.kind === 'vouch/vouch') {
+            nodeOutVouch[link.source]++;
+            nodeInVouch[link.target]++;
+            if (link.mutual) { nodeInVouch[link.source]++; nodeOutVouch[link.target]++; }
+        }
+        else if (link.kind === 'vouch/denounce') {
+            nodeOutDenounce[link.source]++;
+            nodeInDenounce[link.target]++;
+            if (link.mutual) { nodeInDenounce[link.source]++; nodeOutDenounce[link.target]++; }
+        }
+        else if (link.kind === 'vouch/mixed') {
+            nodeOutVouch[link.source]++;
+            nodeInVouch[link.target]++;
+            nodeOutDenounce[link.source]++;
+            nodeInDenounce[link.target]++;
+            if (link.mutual) { nodeInVouch[link.source]++; nodeOutVouch[link.target]++; nodeInDenounce[link.source]++; nodeOutDenounce[link.target]++; }
+        }
+        else if (link.kind === 'follow') {
+            nodeOutFollow[link.source]++;
+            nodeInFollow[link.target]++;
+        }
     }
 
     // pre-compute node colors
@@ -166,14 +188,14 @@ function edgeColor(kind) {
 function edgeWidth(kind, mutual) {
     const base = (() => {
         switch (kind) {
-            case 'vouch/vouch': return 0.8;
-            case 'vouch/denounce': return 0.6;
-            case 'vouch/mixed': return 0.8;
-            case 'follow': return 0.4;
+            case 'vouch/vouch': return 1;
+            case 'vouch/denounce': return 1;
+            case 'vouch/mixed': return 1;
+            case 'follow': return 1;
             default: return 0.4;
         }
     })();
-    return mutual ? base + 0.2 : base;
+    return mutual ? base + 1 : base;
 }
 
 async function loadData() {
@@ -225,6 +247,7 @@ async function initGraph() {
         points: {
             pointIdBy: 'id',
             pointColorBy: 'color',
+            pointColorStrategy: 'direct',
             pointSizeBy: 'size',
             pointSizeStrategy: 'direct',
             pointLabelBy: 'label',
@@ -274,11 +297,12 @@ async function initGraph() {
         focusPointOnClick: true,
         selectPointOnClick: 'single',
         pointDefaultColor: isDark ? '#6e738d' : '#9ca0b0',
+        pointColorStrategy: 'direct',
         pointSizeRange: [5, 20],
         linkDefaultColor: isDark ? 'rgba(107,114,128,0.2)' : 'rgba(107,114,128,0.2)',
-        linkDefaultWidth: 0.5,
+        linkDefaultWidth: 1,
         linkWidthStrategy: 'direct',
-        linkWidthRange: [0.4, 0.8],
+        linkWidthRange: [1, 2],
         enableSimulation: true,
         onPointMouseOver: (pointIndex) => {
             const id = currentRawPoints[pointIndex]?.id;
@@ -332,6 +356,8 @@ function showNodeTooltip(did, pointIndex) {
     const inD = nodeInDenounce[did] || 0;
     const outV = nodeOutVouch[did] || 0;
     const outD = nodeOutDenounce[did] || 0;
+    const inF = nodeInFollow[did] || 0;
+    const outF = nodeOutFollow[did] || 0;
     const total = inV + inD;
     let trustLine = '';
     if (total > 0 || outV + outD > 0) {
@@ -348,6 +374,13 @@ function showNodeTooltip(did, pointIndex) {
         const sep = inPart && outPart ? ' · ' : '';
         trustLine = `<div style="margin-top:4px;font-size:0.6875rem">${pctStr} trusted · ${inPart}${sep}${outPart}</div>`;
     }
+    let followLine = '';
+    if (inF > 0 || outF > 0) {
+        const inPart = inF > 0 ? `<span class="kf">${inF}f</span> in` : '';
+        const outPart = outF > 0 ? `<span class="kf">${outF}f</span> out` : '';
+        const sep = inPart && outPart ? ' · ' : '';
+        followLine = `<div style="font-size:0.6875rem">${inPart}${sep}${outPart}</div>`;
+    }
 
     tooltip.innerHTML = `
         <div class="tooltip-profile">
@@ -356,6 +389,7 @@ function showNodeTooltip(did, pointIndex) {
                 <div class="tooltip-name">${handle || shortenDID(did)}</div>
                 ${handle ? `<div class="tooltip-handle">${shortenDID(did)}</div>` : ''}
                 ${trustLine}
+                ${followLine}
             </div>
         </div>
     `;
