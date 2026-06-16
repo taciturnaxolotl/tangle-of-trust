@@ -15,7 +15,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "vite": "^8.0.10"
+    "vite": "^8.0.16"
   },
   "dependencies": {
     "@cosmograph/cosmograph": "^2.3.1"
